@@ -1,6 +1,5 @@
 import os
 import io
-import urllib.parse
 import discord
 import aiohttp
 from discord.ext import commands
@@ -182,86 +181,69 @@ async def groq_reply(user_id: int, content: str) -> str:
     return reply or "brain lag. say it again."
 
 
-# ─── MAX QUALITY POLLINATIONS SYSTEM ─────────────────────────
+# ─── GEMINI IMAGEN SYSTEM ───────────────────────────────
 
 import asyncio
-import random
 
-QUALITY_BOOSTER = """
-masterpiece, best quality, ultra detailed, 8k, sharp focus,
-professional lighting, cinematic lighting, volumetric light,
-highly detailed textures, realistic shading
-"""
-
-NEGATIVE_PROMPT = """
-blurry, low quality, lowres, watermark, logo, text,
-extra fingers, extra limbs, bad hands, bad anatomy,
-deformed, cropped, worst quality
-"""
 
 async def generate_image_file(prompt: str) -> discord.File:
-    boosted_prompt = f"{prompt}, {QUALITY_BOOSTER}"
-    encoded = urllib.parse.quote(boosted_prompt)
-    negative = urllib.parse.quote(NEGATIVE_PROMPT)
-
-    # Force best model available
-    models = [
-        "stable-diffusion-xl",
-        "sdxl",
-        "stable-diffusion"
-    ]
-
-    timeout = aiohttp.ClientTimeout(total=60)
-
-    connector = aiohttp.TCPConnector(
-        ssl=False,
-        family=0  # Force IPv4 (fixes host errors)
-    )
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "image/png",
+    endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=AIzaSyDpZqnu6FK0sj_fCKOVQJ84ep87-T6ohKs"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                ]
+            }
+        ]
     }
 
-    for attempt in range(3):  # retry system
-        model = random.choice(models)
+    timeout = aiohttp.ClientTimeout(total=90)
+    headers = {"Content-Type": "application/json"}
 
-        url = (
-            f"https://image.pollinations.ai/prompt/{encoded}"
-            f"?model={model}"
-            f"&width=1024"
-            f"&height=1024"
-            f"&nologo=true"
-            f"&negative_prompt={negative}"
-        )
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        for attempt in range(5):
+            async with session.post(endpoint, json=payload) as resp:
+                if resp.status == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after else min(2 ** attempt, 20)
+                    await asyncio.sleep(delay)
+                    continue
 
-        try:
-            async with aiohttp.ClientSession(
-                timeout=timeout,
-                connector=connector,
-                headers=headers
-            ) as session:
-
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        continue
-
-                    data = await resp.read()
-
-                    # Broken image protection
-                    if len(data) < 15_000:
-                        continue
-
-                    return discord.File(
-                        io.BytesIO(data),
-                        filename="image.png"
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(
+                        f"Gemini image generation failed ({resp.status}): {error_text}"
                     )
 
-        except Exception:
-            await asyncio.sleep(1)
-            continue
+                data = await resp.json()
+                candidates = data.get("candidates") or []
+                if not candidates:
+                    raise RuntimeError("Gemini returned no candidates.")
 
-    raise RuntimeError("Pollinations completely failed.")
+                parts = (candidates[0].get("content") or {}).get("parts") or []
+                for part in parts:
+                    inline_data = part.get("inlineData") or {}
+                    image_b64 = inline_data.get("data")
+                    if image_b64:
+                        image_bytes = base64.b64decode(image_b64)
+                        return discord.File(io.BytesIO(image_bytes), filename="image.png")
+
+                    image_uri = part.get("fileUri") or part.get("imageUri") or part.get("url")
+                    if image_uri:
+                        async with session.get(image_uri) as image_resp:
+                            if image_resp.status != 200:
+                                image_error = await image_resp.text()
+                                raise RuntimeError(
+                                    "Gemini image download failed "
+                                    f"({image_resp.status}): {image_error}"
+                                )
+                            image_bytes = await image_resp.read()
+                            return discord.File(io.BytesIO(image_bytes), filename="image.png")
+
+                raise RuntimeError("Gemini response missing image bytes/URL.")
+
+    raise RuntimeError("Gemini image generation hit rate limits repeatedly.")
 
 
 
@@ -288,7 +270,17 @@ async def on_message(message: discord.Message):
 
     bot_id = bot.user.id
 
-    if f"<@{bot_id}>" not in message.content and f"<@!{bot_id}>" not in message.content:
+    mentions_bot = (
+        f"<@{bot_id}>" in message.content or f"<@!{bot_id}>" in message.content
+    )
+    is_reply_to_bot = bool(
+        message.reference
+        and message.reference.resolved
+        and getattr(message.reference.resolved, "author", None)
+        and message.reference.resolved.author.id == bot_id
+    )
+
+    if not mentions_bot and not is_reply_to_bot:
         return
 
     content = (
