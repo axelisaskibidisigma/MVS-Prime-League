@@ -206,8 +206,8 @@ async def generate_image_file(prompt: str) -> discord.File:
             async with session.post(endpoint, json=payload) as resp:
                 if resp.status == 429:
                     retry_after = resp.headers.get("Retry-After")
-                    delay = float(retry_after) if retry_after else min(2 ** attempt, 20)
-                    await asyncio.sleep(delay)
+                    retry_after_seconds = float(retry_after) if retry_after else 0
+                    await asyncio.sleep(max(25, retry_after_seconds))
                     continue
 
                 if resp.status != 200:
