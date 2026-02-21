@@ -187,16 +187,15 @@ import asyncio
 
 
 async def generate_image_file(prompt: str) -> discord.File:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is missing.")
-
-    endpoint = (
-        "https://generativelanguage.googleapis.com/v1beta/"
-        f"models/imagen-3.0-generate-002:predict?key={GEMINI_API_KEY}"
-    )
+    endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=AIzaSyDpZqnu6FK0sj_fCKOVQJ84ep87-T6ohKs"
     payload = {
-        "instances": [{"prompt": prompt}],
-        "parameters": {"sampleCount": 1},
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                ]
+            }
+        ]
     }
 
     timeout = aiohttp.ClientTimeout(total=90)
@@ -218,28 +217,29 @@ async def generate_image_file(prompt: str) -> discord.File:
                     )
 
                 data = await resp.json()
-                predictions = data.get("predictions") or []
-                if not predictions:
-                    raise RuntimeError("Gemini returned no image predictions.")
+                candidates = data.get("candidates") or []
+                if not candidates:
+                    raise RuntimeError("Gemini returned no candidates.")
 
-                first = predictions[0]
-                image_b64 = first.get("bytesBase64Encoded")
-
-                if image_b64:
-                    image_bytes = base64.b64decode(image_b64)
-                    return discord.File(io.BytesIO(image_bytes), filename="image.png")
-
-                image_uri = first.get("imageUri") or first.get("url")
-                if image_uri:
-                    async with session.get(image_uri) as image_resp:
-                        if image_resp.status != 200:
-                            image_error = await image_resp.text()
-                            raise RuntimeError(
-                                "Gemini image download failed "
-                                f"({image_resp.status}): {image_error}"
-                            )
-                        image_bytes = await image_resp.read()
+                parts = (candidates[0].get("content") or {}).get("parts") or []
+                for part in parts:
+                    inline_data = part.get("inlineData") or {}
+                    image_b64 = inline_data.get("data")
+                    if image_b64:
+                        image_bytes = base64.b64decode(image_b64)
                         return discord.File(io.BytesIO(image_bytes), filename="image.png")
+
+                    image_uri = part.get("fileUri") or part.get("imageUri") or part.get("url")
+                    if image_uri:
+                        async with session.get(image_uri) as image_resp:
+                            if image_resp.status != 200:
+                                image_error = await image_resp.text()
+                                raise RuntimeError(
+                                    "Gemini image download failed "
+                                    f"({image_resp.status}): {image_error}"
+                                )
+                            image_bytes = await image_resp.read()
+                            return discord.File(io.BytesIO(image_bytes), filename="image.png")
 
                 raise RuntimeError("Gemini response missing image bytes/URL.")
 
@@ -270,7 +270,12 @@ async def on_message(message: discord.Message):
 
     bot_id = bot.user.id
 
-    if f"<@{bot_id}>" not in message.content and f"<@!{bot_id}>" not in message.content:
+    mentions_bot = (
+        f"<@{bot_id}>" in message.content or f"<@!{bot_id}>" in message.content
+    )
+    is_reply = bool(message.reference)
+
+    if not mentions_bot and not is_reply:
         return
 
     content = (
