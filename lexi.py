@@ -270,7 +270,17 @@ async def on_message(message: discord.Message):
 
     bot_id = bot.user.id
 
-    if f"<@{bot_id}>" not in message.content and f"<@!{bot_id}>" not in message.content:
+    mentions_bot = (
+        f"<@{bot_id}>" in message.content or f"<@!{bot_id}>" in message.content
+    )
+    is_reply_to_bot = bool(
+        message.reference
+        and message.reference.resolved
+        and getattr(message.reference.resolved, "author", None)
+        and message.reference.resolved.author.id == bot_id
+    )
+
+    if not mentions_bot and not is_reply_to_bot:
         return
 
     content = (
