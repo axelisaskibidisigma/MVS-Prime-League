@@ -273,9 +273,8 @@ async def on_message(message: discord.Message):
     mentions_bot = (
         f"<@{bot_id}>" in message.content or f"<@!{bot_id}>" in message.content
     )
-    is_reply = bool(message.reference)
 
-    if not mentions_bot and not is_reply:
+    if not mentions_bot:
         return
 
     content = (
