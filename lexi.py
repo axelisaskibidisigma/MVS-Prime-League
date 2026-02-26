@@ -7,6 +7,7 @@ from groq import Groq
 from dotenv import load_dotenv
 import re
 import base64
+import time
 
 
 load_dotenv()
@@ -186,6 +187,28 @@ async def groq_reply(user_id: int, content: str) -> str:
 import asyncio
 
 
+image_lock = asyncio.Lock()
+last_request_time = 0
+MIN_DELAY = 30  # seconds (safe zone)
+
+
+async def generate_image(prompt):
+    global last_request_time
+
+    async with image_lock:
+        now = time.time()
+        wait_time = MIN_DELAY - (now - last_request_time)
+
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+
+        # 🔥 Call Gemini here
+        file = await generate_image_file(prompt)
+
+        last_request_time = time.time()
+        return file
+
+
 async def generate_image_file(prompt: str) -> discord.File:
     endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=AIzaSyDpZqnu6FK0sj_fCKOVQJ84ep87-T6ohKs"
     payload = {
@@ -318,7 +341,7 @@ async def on_message(message: discord.Message):
         await message.reply("generating...")
 
         try:
-            file = await generate_image_file(prompt)
+            file = await generate_image(prompt)
             await message.reply(file=file)
 
         except Exception as e:
