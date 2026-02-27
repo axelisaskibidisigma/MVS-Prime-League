@@ -189,7 +189,7 @@ import asyncio
 
 image_lock = asyncio.Lock()
 last_request_time = 0
-MIN_DELAY = 30  # seconds (safe zone)
+MIN_DELAY = 15  # seconds (safe for 5 RPM)
 
 
 async def generate_image(prompt):
@@ -197,12 +197,12 @@ async def generate_image(prompt):
 
     async with image_lock:
         now = time.time()
-        wait_time = MIN_DELAY - (now - last_request_time)
+        elapsed = now - last_request_time
 
-        if wait_time > 0:
-            await asyncio.sleep(wait_time)
+        if elapsed < MIN_DELAY:
+            await asyncio.sleep(MIN_DELAY - elapsed)
 
-        # 🔥 Call Gemini here
+        # ---- CALL GEMINI HERE ----
         file = await generate_image_file(prompt)
 
         last_request_time = time.time()
