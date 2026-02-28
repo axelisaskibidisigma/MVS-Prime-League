@@ -201,10 +201,10 @@ async def generate_image(prompt):
             await asyncio.sleep(MIN_DELAY - elapsed)
 
         # ---- CALL GEMINI HERE ----
-        image_url = await generate_image_url(prompt)
+        image_file = await generate_image_file(prompt)
 
         last_request_time = time.time()
-        return image_url
+        return image_file
 
 
 async def generate_image_url(prompt: str) -> str:
@@ -218,6 +218,22 @@ async def generate_image_url(prompt: str) -> str:
         "https://image.pollinations.ai/prompt/"
         f"{encoded}?width=1024&height=1024&model=flux&enhance=true"
     )
+
+
+async def generate_image_file(prompt: str) -> discord.File:
+    image_url = await generate_image_url(prompt)
+    timeout = aiohttp.ClientTimeout(total=90)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(image_url) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(
+                    f"Pollinations image generation failed ({resp.status}): {error_text}"
+                )
+
+            image_bytes = await resp.read()
+            return discord.File(io.BytesIO(image_bytes), filename="image.png")
 
 
 
@@ -292,8 +308,8 @@ async def on_message(message: discord.Message):
         await message.reply("generating...")
 
         try:
-            image_url = await generate_image(prompt)
-            await message.reply(image_url)
+            image_file = await generate_image(prompt)
+            await message.reply(file=image_file)
 
         except Exception as e:
             print("IMAGE ERROR:", e)
