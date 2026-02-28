@@ -1,7 +1,5 @@
 import os
-import io
 import discord
-import aiohttp
 from discord.ext import commands
 from groq import Groq
 from dotenv import load_dotenv
