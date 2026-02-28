@@ -6,7 +6,8 @@ from discord.ext import commands
 from groq import Groq
 from dotenv import load_dotenv
 import re
-import base64
+import time
+import urllib.parse
 
 
 load_dotenv()
@@ -186,64 +187,55 @@ async def groq_reply(user_id: int, content: str) -> str:
 import asyncio
 
 
+image_lock = asyncio.Lock()
+last_request_time = 0
+MIN_DELAY = 15  # seconds (safe for 5 RPM)
+
+
+async def generate_image(prompt):
+    global last_request_time
+
+    async with image_lock:
+        now = time.time()
+        elapsed = now - last_request_time
+
+        if elapsed < MIN_DELAY:
+            await asyncio.sleep(MIN_DELAY - elapsed)
+
+        # ---- CALL GEMINI HERE ----
+        image_file = await generate_image_file(prompt)
+
+        last_request_time = time.time()
+        return image_file
+
+
+async def generate_image_url(prompt: str) -> str:
+    style_prompt = (
+        "(masterpiece, ultra detailed, 8k resolution, cinematic lighting, "
+        "volumetric lighting), "
+        f"{prompt}"
+    )
+    encoded = urllib.parse.quote(style_prompt)
+    return (
+        "https://image.pollinations.ai/prompt/"
+        f"{encoded}?width=1024&height=1024&model=flux&enhance=true"
+    )
+
+
 async def generate_image_file(prompt: str) -> discord.File:
-    endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=AIzaSyDpZqnu6FK0sj_fCKOVQJ84ep87-T6ohKs"
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt},
-                ]
-            }
-        ]
-    }
-
+    image_url = await generate_image_url(prompt)
     timeout = aiohttp.ClientTimeout(total=90)
-    headers = {"Content-Type": "application/json"}
 
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        for attempt in range(5):
-            async with session.post(endpoint, json=payload) as resp:
-                if resp.status == 429:
-                    retry_after = resp.headers.get("Retry-After")
-                    retry_after_seconds = float(retry_after) if retry_after else 0
-                    await asyncio.sleep(max(25, retry_after_seconds))
-                    continue
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(image_url) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                raise RuntimeError(
+                    f"Pollinations image generation failed ({resp.status}): {error_text}"
+                )
 
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise RuntimeError(
-                        f"Gemini image generation failed ({resp.status}): {error_text}"
-                    )
-
-                data = await resp.json()
-                candidates = data.get("candidates") or []
-                if not candidates:
-                    raise RuntimeError("Gemini returned no candidates.")
-
-                parts = (candidates[0].get("content") or {}).get("parts") or []
-                for part in parts:
-                    inline_data = part.get("inlineData") or {}
-                    image_b64 = inline_data.get("data")
-                    if image_b64:
-                        image_bytes = base64.b64decode(image_b64)
-                        return discord.File(io.BytesIO(image_bytes), filename="image.png")
-
-                    image_uri = part.get("fileUri") or part.get("imageUri") or part.get("url")
-                    if image_uri:
-                        async with session.get(image_uri) as image_resp:
-                            if image_resp.status != 200:
-                                image_error = await image_resp.text()
-                                raise RuntimeError(
-                                    "Gemini image download failed "
-                                    f"({image_resp.status}): {image_error}"
-                                )
-                            image_bytes = await image_resp.read()
-                            return discord.File(io.BytesIO(image_bytes), filename="image.png")
-
-                raise RuntimeError("Gemini response missing image bytes/URL.")
-
-    raise RuntimeError("Gemini image generation hit rate limits repeatedly.")
+            image_bytes = await resp.read()
+            return discord.File(io.BytesIO(image_bytes), filename="image.png")
 
 
 
@@ -318,8 +310,8 @@ async def on_message(message: discord.Message):
         await message.reply("generating...")
 
         try:
-            file = await generate_image_file(prompt)
-            await message.reply(file=file)
+            image_file = await generate_image(prompt)
+            await message.reply(file=image_file)
 
         except Exception as e:
             print("IMAGE ERROR:", e)
