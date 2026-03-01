@@ -1,11 +1,13 @@
 import os
+import io
+import asyncio
 import discord
 from discord.ext import commands
 from groq import Groq
+from google import genai
 from dotenv import load_dotenv
 import re
 import time
-import urllib.parse
 
 
 load_dotenv()
@@ -20,6 +22,8 @@ if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is missing")
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
@@ -80,6 +84,7 @@ intents.presences = True
 bot = commands.Bot(command_prefix="+", intents=intents)
 
 groq = Groq(api_key=GROQ_API_KEY)
+gemini = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
 
 
 
@@ -182,8 +187,6 @@ async def groq_reply(user_id: int, content: str) -> str:
 
 # ─── GEMINI IMAGEN SYSTEM ───────────────────────────────
 
-import asyncio
-
 
 image_lock = asyncio.Lock()
 last_request_time = 0
@@ -207,35 +210,27 @@ async def generate_image(prompt):
         return image_file
 
 
-async def generate_image_url(prompt: str) -> str:
-    encoded = urllib.parse.quote(prompt)
-    return (
-        "https://image.pollinations.ai/prompt/"
-        f"{encoded}?width=1024&height=1024&model=flux&enhance=true"
-    )
-
-
 async def generate_image_file(prompt: str) -> discord.File:
-    image_url = await generate_image_url(prompt)
-    timeout = aiohttp.ClientTimeout(total=90)
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://pollinations.ai/",
-        "Connection": "keep-alive",
-    }
+    def _request_image() -> bytes:
+        response = gemini.models.generate_content(
+            model="gemini-2.5-flash-image",
+            contents=prompt,
+        )
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(image_url, headers=headers) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(
-                    f"Pollinations image generation failed ({resp.status}): {error_text}"
-                )
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            raise RuntimeError("No candidates returned by Gemini")
 
-            image_bytes = await resp.read()
-            return discord.File(io.BytesIO(image_bytes), filename="image.png")
+        parts = getattr(candidates[0].content, "parts", None) or []
+        for part in parts:
+            inline_data = getattr(part, "inline_data", None)
+            if inline_data and getattr(inline_data, "data", None):
+                return inline_data.data
+
+        raise RuntimeError("No image data found in response")
+
+    image_bytes = await asyncio.to_thread(_request_image)
+    return discord.File(io.BytesIO(image_bytes), filename="image.png")
 
 
 
