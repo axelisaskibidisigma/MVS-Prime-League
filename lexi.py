@@ -1,11 +1,14 @@
 import os
+import io
+import asyncio
 import discord
 from discord.ext import commands
 from groq import Groq
 from dotenv import load_dotenv
 import re
 import time
-import urllib.parse
+import aiohttp
+import base64
 
 
 load_dotenv()
@@ -13,13 +16,15 @@ load_dotenv()
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+HORDE_API_KEY = os.getenv("HORDE_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
+if not HORDE_API_KEY:
+    raise RuntimeError("HORDE_API_KEY is missing")
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
@@ -80,12 +85,6 @@ intents.presences = True
 bot = commands.Bot(command_prefix="+", intents=intents)
 
 groq = Groq(api_key=GROQ_API_KEY)
-
-
-
-
-
-
 
 # ─── MEMORY + SETTINGS ───────────────────────────────────
 user_memory: dict[int, list] = {}
@@ -180,9 +179,7 @@ async def groq_reply(user_id: int, content: str) -> str:
     return reply or "brain lag. say it again."
 
 
-# ─── GEMINI IMAGEN SYSTEM ───────────────────────────────
-
-import asyncio
+# ─── STABLE HORDE IMAGE SYSTEM ───────────────────────────
 
 
 image_lock = asyncio.Lock()
@@ -207,35 +204,48 @@ async def generate_image(prompt):
         return image_file
 
 
-async def generate_image_url(prompt: str) -> str:
-    encoded = urllib.parse.quote(prompt)
-    return (
-        "https://image.pollinations.ai/prompt/"
-        f"{encoded}?width=1024&height=1024&model=flux&enhance=true"
-    )
-
-
 async def generate_image_file(prompt: str) -> discord.File:
-    image_url = await generate_image_url(prompt)
-    timeout = aiohttp.ClientTimeout(total=90)
+    async_url = "https://stablehorde.net/api/v2/generate/async"
+    check_url = "https://stablehorde.net/api/v2/generate/status/"
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://pollinations.ai/",
-        "Connection": "keep-alive",
+        "apikey": HORDE_API_KEY,
+        "Client-Agent": "DiscordBot:1.0 (by you)",
     }
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(image_url, headers=headers) as resp:
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(
-                    f"Pollinations image generation failed ({resp.status}): {error_text}"
-                )
+    payload = {
+        "prompt": prompt,
+        "params": {
+            "steps": 30,
+            "width": 768,
+            "height": 768,
+            "sampler_name": "k_euler_a",
+        },
+        "nsfw": False,
+        "trusted_workers": False,
+    }
 
-            image_bytes = await resp.read()
-            return discord.File(io.BytesIO(image_bytes), filename="image.png")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(async_url, json=payload, headers=headers) as resp:
+            if resp.status != 202:
+                raise RuntimeError(f"Submit failed: {await resp.text()}")
+
+            data = await resp.json()
+            job_id = data["id"]
+
+        while True:
+            await asyncio.sleep(3)
+
+            async with session.get(check_url + job_id, headers=headers) as resp:
+                status_data = await resp.json()
+
+            if status_data["done"]:
+                break
+
+        img_b64 = status_data["generations"][0]["img"]
+        img_bytes = base64.b64decode(img_b64)
+
+        return discord.File(io.BytesIO(img_bytes), filename="horde.png")
 
 
 
