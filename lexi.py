@@ -84,7 +84,7 @@ intents.presences = True
 bot = commands.Bot(command_prefix="+", intents=intents)
 
 groq = Groq(api_key=GROQ_API_KEY)
-gemini = genai.Client(api_key=GEMINI_API_KEY)
+gemini = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
 
 
 
@@ -212,21 +212,22 @@ async def generate_image(prompt):
 
 async def generate_image_file(prompt: str) -> discord.File:
     def _request_image() -> bytes:
-        result = gemini.models.generate_images(
-            model="imagen-4.0-generate-001",
-            prompt=prompt,
-            config={"number_of_images": 1},
+        response = gemini.models.generate_content(
+            model="gemini-2.5-flash-image",
+            contents=prompt,
         )
 
-        images = getattr(result, "generated_images", None) or []
-        if not images:
-            raise RuntimeError("Gemini returned no images")
+        candidates = getattr(response, "candidates", None) or []
+        if not candidates:
+            raise RuntimeError("No candidates returned by Gemini")
 
-        image = images[0].image
-        if not image or not getattr(image, "image_bytes", None):
-            raise RuntimeError("Gemini response did not contain image bytes")
+        parts = getattr(candidates[0].content, "parts", None) or []
+        for part in parts:
+            inline_data = getattr(part, "inline_data", None)
+            if inline_data and getattr(inline_data, "data", None):
+                return inline_data.data
 
-        return image.image_bytes
+        raise RuntimeError("No image data found in response")
 
     image_bytes = await asyncio.to_thread(_request_image)
     return discord.File(io.BytesIO(image_bytes), filename="image.png")
