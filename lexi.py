@@ -2,7 +2,7 @@ import os
 import io
 import asyncio
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from groq import Groq
 from google import genai
 from dotenv import load_dotenv
@@ -30,6 +30,7 @@ BENTIE_ID = 1172198644234072297
 FROXX_ID = 1372276731645399090
 
 MODEL = "llama-3.1-8b-instant"
+STAY_VC_ID = 1447019217709961396
 
 
 
@@ -80,11 +81,53 @@ def contains_nsfw(text: str) -> bool:
 intents = discord.Intents.default()
 intents.message_content = True
 intents.presences = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="+", intents=intents)
 
 groq = Groq(api_key=GROQ_API_KEY)
 gemini = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
+voice_reconnect_lock = asyncio.Lock()
+
+
+async def ensure_stay_voice_channel() -> None:
+    async with voice_reconnect_lock:
+        channel = bot.get_channel(STAY_VC_ID)
+
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(STAY_VC_ID)
+            except Exception as e:
+                print(f"VC FETCH ERROR: {e}")
+                return
+
+        if not isinstance(channel, discord.VoiceChannel):
+            print(f"Configured channel {STAY_VC_ID} is not a voice channel")
+            return
+
+        guild = channel.guild
+        voice_client = guild.voice_client
+
+        try:
+            if voice_client and voice_client.is_connected():
+                if voice_client.channel.id != STAY_VC_ID:
+                    await voice_client.move_to(channel)
+            else:
+                if voice_client:
+                    await voice_client.disconnect(force=True)
+                await channel.connect(reconnect=True, self_deaf=True)
+        except Exception as e:
+            print(f"VC REJOIN ERROR: {e}")
+
+
+@tasks.loop(seconds=30)
+async def voice_watchdog():
+    await ensure_stay_voice_channel()
+
+
+@voice_watchdog.before_loop
+async def before_voice_watchdog():
+    await bot.wait_until_ready()
 
 
 
@@ -243,6 +286,23 @@ async def on_ready():
             )
         )
         print(f"Logged in as {bot.user}")
+        if not voice_watchdog.is_running():
+            voice_watchdog.start()
+        await ensure_stay_voice_channel()
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if not bot.user or member.id != bot.user.id:
+        return
+
+    target_channel = bot.get_channel(STAY_VC_ID)
+    if not isinstance(target_channel, discord.VoiceChannel):
+        return
+
+    moved_off_target = after.channel is None or after.channel.id != STAY_VC_ID
+    if moved_off_target:
+        await ensure_stay_voice_channel()
 
 
 
