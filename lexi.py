@@ -2,14 +2,13 @@ import os
 import io
 import asyncio
 import base64
-import json
 import discord
 from discord.ext import commands, tasks
 from groq import Groq
 from dotenv import load_dotenv
 import re
 import time
-import urllib.request
+import aiohttp
 
 
 load_dotenv()
@@ -255,35 +254,33 @@ async def generate_image(prompt):
 
 
 async def generate_image_file(prompt: str) -> discord.File:
-    def _request_image() -> bytes:
-        payload = {
-            "prompt": prompt,
-            "models": ["Protogen x4.1"],
-            "nsfw": False,
-            "params": {
-                "steps": 30,
-                "cfg_scale": 6.5,
-                "width": 768,
-                "height": 768,
-                "sampler_name": "k_euler_a",
-            },
-        }
+    payload = {
+        "prompt": prompt,
+        "models": ["Protogen x4.1"],
+        "nsfw": False,
+        "params": {
+            "steps": 30,
+            "cfg_scale": 6.5,
+            "width": 768,
+            "height": 768,
+            "sampler_name": "k_euler_a",
+        },
+    }
 
-        headers = {
-            "apikey": HORDE_API_KEY,
-            "Content-Type": "application/json",
-            "Client-Agent": "MVS-Prime-League:1.0",
-        }
+    headers = {
+        "apikey": HORDE_API_KEY,
+        "Content-Type": "application/json",
+        "Client-Agent": "MVS-Prime-League:1.0",
+    }
 
-        req = urllib.request.Request(
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
             "https://stablehorde.net/api/v2/generate/async",
-            data=json.dumps(payload).encode("utf-8"),
+            json=payload,
             headers=headers,
-            method="POST",
-        )
-
-        with urllib.request.urlopen(req, timeout=30) as response:
-            init_data = json.loads(response.read().decode("utf-8"))
+            timeout=30,
+        ) as response:
+            init_data = await response.json()
 
         request_id = init_data.get("id")
         if not request_id:
@@ -292,29 +289,41 @@ async def generate_image_file(prompt: str) -> discord.File:
         status_url = f"https://stablehorde.net/api/v2/generate/status/{request_id}"
 
         for _ in range(60):
-            status_req = urllib.request.Request(status_url, headers=headers, method="GET")
-            with urllib.request.urlopen(status_req, timeout=30) as response:
-                status_data = json.loads(response.read().decode("utf-8"))
+            async with session.get(status_url, headers=headers, timeout=30) as response:
+                status_data = await response.json()
 
             if status_data.get("faulted"):
                 raise RuntimeError("Stable Horde generation faulted")
 
             generations = status_data.get("generations") or []
             if generations:
-                encoded_image = generations[0].get("img")
-                if not encoded_image:
+                img_data = generations[0].get("img")
+                if not img_data:
                     raise RuntimeError("Stable Horde returned empty image")
-                return base64.b64decode(encoded_image)
+
+                if img_data.startswith("http"):
+                    async with session.get(img_data) as img_resp:
+                        img_bytes = await img_resp.read()
+
+                else:
+                    # Remove base64 header if present
+                    if "," in img_data:
+                        img_data = img_data.split(",", 1)[1]
+
+                    img_bytes = base64.b64decode(img_data)
+
+                if len(img_bytes) < 1000:
+                    raise RuntimeError("Image returned too small — likely worker failure")
+
+                return discord.File(io.BytesIO(img_bytes), filename="image.png")
 
             if status_data.get("done"):
                 break
 
-            time.sleep(2)
+            await asyncio.sleep(2)
 
-        raise RuntimeError("Stable Horde generation timed out")
+    raise RuntimeError("Stable Horde generation timed out")
 
-    image_bytes = await asyncio.to_thread(_request_image)
-    return discord.File(io.BytesIO(image_bytes), filename="image.png")
 
 
 
