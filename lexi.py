@@ -1,13 +1,15 @@
 import os
 import io
 import asyncio
+import base64
+import json
 import discord
 from discord.ext import commands, tasks
 from groq import Groq
-from google import genai
 from dotenv import load_dotenv
 import re
 import time
+import urllib.request
 
 
 load_dotenv()
@@ -15,15 +17,15 @@ load_dotenv()
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+HORDE_API_KEY = os.getenv("HORDE_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing")
+if not HORDE_API_KEY:
+    raise RuntimeError("HORDE_API_KEY is missing")
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
@@ -86,7 +88,6 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="+", intents=intents)
 
 groq = Groq(api_key=GROQ_API_KEY)
-gemini = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
 voice_reconnect_lock = asyncio.Lock()
 
 
@@ -228,7 +229,7 @@ async def groq_reply(user_id: int, content: str) -> str:
     return reply or "brain lag. say it again."
 
 
-# ─── GEMINI IMAGEN SYSTEM ───────────────────────────────
+# ─── STABLE HORDE IMAGE SYSTEM ──────────────────────────
 
 
 image_lock = asyncio.Lock()
@@ -246,7 +247,7 @@ async def generate_image(prompt):
         if elapsed < MIN_DELAY:
             await asyncio.sleep(MIN_DELAY - elapsed)
 
-        # ---- CALL GEMINI HERE ----
+        # ---- CALL STABLE HORDE HERE ----
         image_file = await generate_image_file(prompt)
 
         last_request_time = time.time()
@@ -255,22 +256,62 @@ async def generate_image(prompt):
 
 async def generate_image_file(prompt: str) -> discord.File:
     def _request_image() -> bytes:
-        response = gemini.models.generate_content(
-            model="gemini-2.5-flash-image",
-            contents=prompt,
+        payload = {
+            "prompt": prompt,
+            "models": ["Protogen x4.1"],
+            "nsfw": False,
+            "params": {
+                "steps": 30,
+                "cfg_scale": 6.5,
+                "width": 768,
+                "height": 768,
+                "sampler_name": "k_euler_a",
+            },
+        }
+
+        headers = {
+            "apikey": HORDE_API_KEY,
+            "Content-Type": "application/json",
+            "Client-Agent": "MVS-Prime-League:1.0",
+        }
+
+        req = urllib.request.Request(
+            "https://stablehorde.net/api/v2/generate/async",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
         )
 
-        candidates = getattr(response, "candidates", None) or []
-        if not candidates:
-            raise RuntimeError("No candidates returned by Gemini")
+        with urllib.request.urlopen(req, timeout=30) as response:
+            init_data = json.loads(response.read().decode("utf-8"))
 
-        parts = getattr(candidates[0].content, "parts", None) or []
-        for part in parts:
-            inline_data = getattr(part, "inline_data", None)
-            if inline_data and getattr(inline_data, "data", None):
-                return inline_data.data
+        request_id = init_data.get("id")
+        if not request_id:
+            raise RuntimeError("No request ID returned by Stable Horde")
 
-        raise RuntimeError("No image data found in response")
+        status_url = f"https://stablehorde.net/api/v2/generate/status/{request_id}"
+
+        for _ in range(60):
+            status_req = urllib.request.Request(status_url, headers=headers, method="GET")
+            with urllib.request.urlopen(status_req, timeout=30) as response:
+                status_data = json.loads(response.read().decode("utf-8"))
+
+            if status_data.get("faulted"):
+                raise RuntimeError("Stable Horde generation faulted")
+
+            generations = status_data.get("generations") or []
+            if generations:
+                encoded_image = generations[0].get("img")
+                if not encoded_image:
+                    raise RuntimeError("Stable Horde returned empty image")
+                return base64.b64decode(encoded_image)
+
+            if status_data.get("done"):
+                break
+
+            time.sleep(2)
+
+        raise RuntimeError("Stable Horde generation timed out")
 
     image_bytes = await asyncio.to_thread(_request_image)
     return discord.File(io.BytesIO(image_bytes), filename="image.png")
