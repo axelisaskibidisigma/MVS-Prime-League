@@ -1,13 +1,16 @@
 import os
 import io
 import asyncio
+import base64
+import json
 import discord
 from discord.ext import commands, tasks
 from groq import Groq
-from google import genai
 from dotenv import load_dotenv
 import re
 import time
+import urllib.request
+import urllib.error
 
 
 load_dotenv()
@@ -15,15 +18,15 @@ load_dotenv()
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+HORDE_API_KEY = os.getenv("HORDE_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing")
+if not HORDE_API_KEY:
+    raise RuntimeError("HORDE_API_KEY is missing")
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
@@ -86,12 +89,19 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="+", intents=intents)
 
 groq = Groq(api_key=GROQ_API_KEY)
-gemini = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1beta"})
 voice_reconnect_lock = asyncio.Lock()
+voice_retry_backoff = 5
+next_voice_retry_at = 0.0
 
 
 async def ensure_stay_voice_channel() -> None:
+    global voice_retry_backoff, next_voice_retry_at
+
     async with voice_reconnect_lock:
+        now = time.time()
+        if now < next_voice_retry_at:
+            return
+
         channel = bot.get_channel(STAY_VC_ID)
 
         if channel is None:
@@ -110,14 +120,25 @@ async def ensure_stay_voice_channel() -> None:
 
         try:
             if voice_client and voice_client.is_connected():
-                if voice_client.channel.id != STAY_VC_ID:
+                if voice_client.channel and voice_client.channel.id != STAY_VC_ID:
                     await voice_client.move_to(channel)
-            else:
-                if voice_client:
+                voice_retry_backoff = 5
+                next_voice_retry_at = 0.0
+                return
+
+            if voice_client:
+                try:
                     await voice_client.disconnect(force=True)
-                await channel.connect(reconnect=True, self_deaf=True)
+                except Exception as e:
+                    print(f"VC CLEANUP ERROR: {e}")
+
+            await channel.connect(reconnect=False, timeout=20.0, self_deaf=True)
+            voice_retry_backoff = 5
+            next_voice_retry_at = 0.0
         except Exception as e:
             print(f"VC REJOIN ERROR: {e}")
+            next_voice_retry_at = time.time() + voice_retry_backoff
+            voice_retry_backoff = min(voice_retry_backoff * 2, 120)
 
 
 @tasks.loop(seconds=30)
@@ -228,16 +249,19 @@ async def groq_reply(user_id: int, content: str) -> str:
     return reply or "brain lag. say it again."
 
 
-# ─── GEMINI IMAGEN SYSTEM ───────────────────────────────
+# ─── STABLE HORDE IMAGE SYSTEM ──────────────────────────
 
 
 image_lock = asyncio.Lock()
 last_request_time = 0
-MIN_DELAY = 15  # seconds (safe for 5 RPM)
+next_image_retry_at = 0.0
+MIN_DELAY = 20  # seconds (safer against Stable Horde rate limits)
+HORDE_MAX_RETRIES = 6
+HORDE_STATUS_POLL_SECONDS = 3
 
 
-async def generate_image(prompt):
-    global last_request_time
+async def generate_image(prompt: str, source_image_bytes: bytes | None = None):
+    global last_request_time, next_image_retry_at
 
     async with image_lock:
         now = time.time()
@@ -246,31 +270,123 @@ async def generate_image(prompt):
         if elapsed < MIN_DELAY:
             await asyncio.sleep(MIN_DELAY - elapsed)
 
-        # ---- CALL GEMINI HERE ----
-        image_file = await generate_image_file(prompt)
+        now = time.time()
+        if now < next_image_retry_at:
+            wait_for = int(next_image_retry_at - now) + 1
+            raise RuntimeError(f"RATE_LIMITED:{wait_for}")
+
+        # ---- CALL STABLE HORDE HERE ----
+        image_file = await generate_image_file(prompt, source_image_bytes=source_image_bytes)
 
         last_request_time = time.time()
         return image_file
 
 
-async def generate_image_file(prompt: str) -> discord.File:
+async def generate_image_file(prompt: str, source_image_bytes: bytes | None = None) -> discord.File:
+    global next_image_retry_at
+    def _retry_delay(response_headers, attempt: int) -> float:
+        retry_after = None
+        if response_headers:
+            retry_after = response_headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(1.0, float(retry_after))
+            except ValueError:
+                pass
+        return min(2 ** attempt, 30)
+
+    def _open_json(req: urllib.request.Request, context: str) -> dict:
+        for attempt in range(HORDE_MAX_RETRIES):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="ignore")
+                if e.code == 429 and attempt < HORDE_MAX_RETRIES - 1:
+                    delay = _retry_delay(getattr(e, "headers", None), attempt)
+                    next_image_retry_at = max(next_image_retry_at, time.time() + delay)
+                    print(f"{context} rate-limited (429). retrying in {delay:.1f}s")
+                    time.sleep(delay)
+                    continue
+                if e.code == 429:
+                    delay = _retry_delay(getattr(e, "headers", None), HORDE_MAX_RETRIES - 1)
+                    next_image_retry_at = max(next_image_retry_at, time.time() + delay)
+                    raise RuntimeError(f"RATE_LIMITED:{int(delay)+1}") from e
+                raise RuntimeError(f"{context} failed: {e.code} {body}") from e
+            except urllib.error.URLError as e:
+                if attempt < HORDE_MAX_RETRIES - 1:
+                    delay = min(2 ** attempt, 10)
+                    print(f"{context} network error. retrying in {delay:.1f}s")
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(f"{context} network error: {e}") from e
+
+        raise RuntimeError(f"{context} failed after retries")
+
     def _request_image() -> bytes:
-        response = gemini.models.generate_content(
-            model="gemini-2.5-flash-image",
-            contents=prompt,
+        payload = {
+            "prompt": prompt,
+            "models": ["Protogen x4.1"],
+            "nsfw": False,
+            "params": {
+                "steps": 30,
+                "cfg_scale": 6.5,
+                "width": 768,
+                "height": 768,
+                "sampler_name": "k_euler_a",
+            },
+        }
+
+        if source_image_bytes:
+            payload["source_image"] = base64.b64encode(source_image_bytes).decode("utf-8")
+            payload["source_processing"] = "img2img"
+            payload["params"]["denoising_strength"] = 0.65
+
+        headers = {
+            "apikey": HORDE_API_KEY,
+            "Content-Type": "application/json",
+            "Client-Agent": "MVS-Prime-League:1.0",
+        }
+
+        req = urllib.request.Request(
+            "https://stablehorde.net/api/v2/generate/async",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
         )
 
-        candidates = getattr(response, "candidates", None) or []
-        if not candidates:
-            raise RuntimeError("No candidates returned by Gemini")
+        init_data = _open_json(req, "Stable Horde request")
 
-        parts = getattr(candidates[0].content, "parts", None) or []
-        for part in parts:
-            inline_data = getattr(part, "inline_data", None)
-            if inline_data and getattr(inline_data, "data", None):
-                return inline_data.data
+        request_id = init_data.get("id")
+        if not request_id:
+            raise RuntimeError("No request ID returned by Stable Horde")
 
-        raise RuntimeError("No image data found in response")
+        status_url = f"https://stablehorde.net/api/v2/generate/status/{request_id}"
+
+        for _ in range(60):
+            status_req = urllib.request.Request(status_url, headers=headers, method="GET")
+            status_data = _open_json(status_req, "Stable Horde status")
+
+            if status_data.get("faulted"):
+                raise RuntimeError("Stable Horde generation faulted")
+
+            generations = status_data.get("generations") or []
+            if generations:
+                encoded_image = generations[0].get("img")
+                if not encoded_image:
+                    raise RuntimeError("Stable Horde returned empty image")
+                return base64.b64decode(encoded_image)
+
+            if status_data.get("done"):
+                break
+
+            wait_time = status_data.get("wait_time")
+            if isinstance(wait_time, (int, float)) and wait_time > 0:
+                time.sleep(max(1, min(wait_time, 10)))
+            else:
+                time.sleep(HORDE_STATUS_POLL_SECONDS)
+
+        raise RuntimeError("Stable Horde generation timed out")
 
     image_bytes = await asyncio.to_thread(_request_image)
     return discord.File(io.BytesIO(image_bytes), filename="image.png")
@@ -302,6 +418,7 @@ async def on_voice_state_update(member, before, after):
 
     moved_off_target = after.channel is None or after.channel.id != STAY_VC_ID
     if moved_off_target:
+        await asyncio.sleep(3)
         await ensure_stay_voice_channel()
 
 
@@ -362,15 +479,27 @@ async def on_message(message: discord.Message):
             await message.reply("nice try 💀 NSFW is off.")
             return
 
+        source_image_bytes = None
+        if message.attachments:
+            attachment = message.attachments[0]
+            content_type = attachment.content_type or ""
+            is_image = content_type.startswith("image/") or attachment.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+            if is_image:
+                source_image_bytes = await attachment.read()
+
         await message.reply("generating...")
 
         try:
-            image_file = await generate_image(prompt)
+            image_file = await generate_image(prompt, source_image_bytes=source_image_bytes)
             await message.reply(file=image_file)
 
         except Exception as e:
             print("IMAGE ERROR:", e)
-            await message.reply("image gen died. unlucky.")
+            err = str(e).lower()
+            if "429" in err or "rate-limit" in err or "rate limited" in err:
+                await message.reply("stable horde is rate limited rn. wait a bit then try again.")
+            else:
+                await message.reply("image gen died. unlucky.")
 
         return
 
