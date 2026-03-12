@@ -1,7 +1,6 @@
 import os
 import io
 import asyncio
-import base64
 import discord
 from discord.ext import commands, tasks
 from groq import Groq
@@ -9,6 +8,7 @@ from dotenv import load_dotenv
 import re
 import time
 import aiohttp
+from urllib.parse import quote_plus
 
 
 load_dotenv()
@@ -16,15 +16,15 @@ load_dotenv()
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-HORDE_API_KEY = os.getenv("HORDE_API_KEY")
+POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
-if not HORDE_API_KEY:
-    raise RuntimeError("HORDE_API_KEY is missing")
+if not POLLINATIONS_API_KEY:
+    raise RuntimeError("POLLINATIONS_API_KEY is missing")
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
@@ -241,7 +241,7 @@ async def groq_reply(user_id: int, content: str) -> str:
     return reply or "brain lag. say it again."
 
 
-# ─── STABLE HORDE IMAGE SYSTEM ──────────────────────────
+# ─── POLLINATIONS IMAGE SYSTEM ──────────────────────────
 
 
 image_lock = asyncio.Lock()
@@ -259,7 +259,7 @@ async def generate_image(prompt):
         if elapsed < MIN_DELAY:
             await asyncio.sleep(MIN_DELAY - elapsed)
 
-        # ---- CALL STABLE HORDE HERE ----
+        # ---- CALL POLLINATIONS HERE ----
         image_file = await generate_image_file(prompt)
 
         last_request_time = time.time()
@@ -267,79 +267,30 @@ async def generate_image(prompt):
 
 
 async def generate_image_file(prompt: str) -> discord.File:
-    payload = {
-        "prompt": prompt,
-        "models": ["Protogen x4.1"],
-        "nsfw": False,
-        "params": {
-            "steps": 30,
-            "cfg_scale": 6.5,
-            "width": 768,
-            "height": 768,
-            "sampler_name": "k_euler_a",
-        },
+    headers = {
+        "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
+        "X-API-Key": POLLINATIONS_API_KEY,
     }
 
-    headers = {
-        "apikey": HORDE_API_KEY,
-        "Content-Type": "application/json",
-        "Client-Agent": "MVS-Prime-League:1.0",
-    }
+    encoded_prompt = quote_plus(prompt)
+    image_url = (
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        "?model=flux&nologo=true&private=true&width=768&height=768"
+    )
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://stablehorde.net/api/v2/generate/async",
-            json=payload,
-            headers=headers,
-            timeout=30,
-        ) as response:
-            init_data = await response.json()
+        async with session.get(image_url, headers=headers, timeout=60) as response:
+            if response.status >= 400:
+                error_body = await response.text()
+                raise RuntimeError(f"Pollinations generation failed ({response.status}): {error_body}")
 
-        request_id = init_data.get("id")
-        if not request_id:
-            raise RuntimeError("No request ID returned by Stable Horde")
+            img_bytes = await response.read()
 
-        status_url = f"https://stablehorde.net/api/v2/generate/status/{request_id}"
+    if len(img_bytes) < 1000:
+        raise RuntimeError("Pollinations returned an unexpectedly small image")
 
-        for _ in range(60):
-            async with session.get(status_url, headers=headers, timeout=30) as response:
-                status_data = await response.json()
-
-            if status_data.get("faulted"):
-                raise RuntimeError("Stable Horde generation faulted")
-
-            generations = status_data.get("generations") or []
-            if generations:
-                generation = generations[0]
-                used_model = generation.get("model") or generation.get("model_name") or "unknown"
-                print(f"Stable Horde model used: {used_model}")
-
-                img_data = generation.get("img")
-                if not img_data:
-                    raise RuntimeError("Stable Horde returned empty image")
-
-                if img_data.startswith("http"):
-                    async with session.get(img_data) as img_resp:
-                        img_bytes = await img_resp.read()
-
-                else:
-                    # Remove base64 header if present
-                    if "," in img_data:
-                        img_data = img_data.split(",", 1)[1]
-
-                    img_bytes = base64.b64decode(img_data)
-
-                if len(img_bytes) < 1000:
-                    raise RuntimeError("Image returned too small — likely worker failure")
-
-                return discord.File(io.BytesIO(img_bytes), filename="image.png")
-
-            if status_data.get("done"):
-                break
-
-            await asyncio.sleep(2)
-
-    raise RuntimeError("Stable Horde generation timed out")
+    print("Pollinations model used: flux")
+    return discord.File(io.BytesIO(img_bytes), filename="image.png")
 
 
 
