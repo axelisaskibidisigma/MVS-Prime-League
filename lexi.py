@@ -90,19 +90,27 @@ groq = Groq(api_key=GROQ_API_KEY)
 voice_reconnect_lock = asyncio.Lock()
 
 
+async def get_stay_voice_channel() -> discord.VoiceChannel | None:
+    channel = bot.get_channel(STAY_VC_ID)
+
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(STAY_VC_ID)
+        except Exception as e:
+            print(f"VC FETCH ERROR: {e}")
+            return None
+
+    if not isinstance(channel, discord.VoiceChannel):
+        print(f"Configured channel {STAY_VC_ID} is not a voice channel")
+        return None
+
+    return channel
+
+
 async def ensure_stay_voice_channel() -> None:
     async with voice_reconnect_lock:
-        channel = bot.get_channel(STAY_VC_ID)
-
+        channel = await get_stay_voice_channel()
         if channel is None:
-            try:
-                channel = await bot.fetch_channel(STAY_VC_ID)
-            except Exception as e:
-                print(f"VC FETCH ERROR: {e}")
-                return
-
-        if not isinstance(channel, discord.VoiceChannel):
-            print(f"Configured channel {STAY_VC_ID} is not a voice channel")
             return
 
         guild = channel.guild
@@ -110,17 +118,22 @@ async def ensure_stay_voice_channel() -> None:
 
         try:
             if voice_client and voice_client.is_connected():
-                if voice_client.channel.id != STAY_VC_ID:
+                if voice_client.channel and voice_client.channel.id != STAY_VC_ID:
                     await voice_client.move_to(channel)
-            else:
-                if voice_client:
+                return
+
+            if voice_client:
+                try:
                     await voice_client.disconnect(force=True)
-                await channel.connect(reconnect=True, self_deaf=True)
+                except Exception:
+                    pass
+
+            await channel.connect(reconnect=True, self_deaf=True)
         except Exception as e:
             print(f"VC REJOIN ERROR: {e}")
 
 
-@tasks.loop(seconds=30)
+@tasks.loop(seconds=15)
 async def voice_watchdog():
     await ensure_stay_voice_channel()
 
@@ -297,7 +310,11 @@ async def generate_image_file(prompt: str) -> discord.File:
 
             generations = status_data.get("generations") or []
             if generations:
-                img_data = generations[0].get("img")
+                generation = generations[0]
+                used_model = generation.get("model") or generation.get("model_name") or "unknown"
+                print(f"Stable Horde model used: {used_model}")
+
+                img_data = generation.get("img")
                 if not img_data:
                     raise RuntimeError("Stable Horde returned empty image")
 
@@ -342,12 +359,20 @@ async def on_ready():
 
 
 @bot.event
+async def on_disconnect():
+    # Gateway disconnects can drop VC; watchdog/on_ready will recover, but
+    # we also trigger an immediate best-effort reconnect when possible.
+    if bot.is_ready():
+        await ensure_stay_voice_channel()
+
+
+@bot.event
 async def on_voice_state_update(member, before, after):
     if not bot.user or member.id != bot.user.id:
         return
 
-    target_channel = bot.get_channel(STAY_VC_ID)
-    if not isinstance(target_channel, discord.VoiceChannel):
+    target_channel = await get_stay_voice_channel()
+    if target_channel is None:
         return
 
     moved_off_target = after.channel is None or after.channel.id != STAY_VC_ID
