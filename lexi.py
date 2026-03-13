@@ -3,7 +3,6 @@ import io
 import asyncio
 import discord
 from discord.ext import commands, tasks
-from groq import Groq
 from dotenv import load_dotenv
 import re
 import time
@@ -15,14 +14,11 @@ load_dotenv()
 
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
-if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY is missing")
 if not POLLINATIONS_API_KEY:
     raise RuntimeError("POLLINATIONS_API_KEY is missing")
 
@@ -30,7 +26,7 @@ AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
 FROXX_ID = 1372276731645399090
 
-MODEL = "llama-3.1-8b-instant"
+MODEL = "gemini-fast"
 STAY_VC_ID = 1447019217709961396
 
 
@@ -86,7 +82,6 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="+", intents=intents)
 
-groq = Groq(api_key=GROQ_API_KEY)
 voice_reconnect_lock = asyncio.Lock()
 
 
@@ -211,8 +206,8 @@ Server lore:
 """
 
 
-# ─── GROQ CHAT ───────────────────────────────────────────
-async def groq_reply(user_id: int, content: str) -> str:
+# ─── POLLINATIONS CHAT ───────────────────────────────────
+async def pollinations_reply(user_id: int, content: str) -> str:
     history = user_memory.get(user_id, [])
 
     messages = [
@@ -223,15 +218,33 @@ async def groq_reply(user_id: int, content: str) -> str:
     messages.extend(history[-6:])
     messages.append({"role": "user", "content": content})
 
-    response = groq.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.9,
-        max_tokens=80,
-        top_p=0.95,
-    )
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "temperature": 0.9,
+        "max_tokens": 80,
+        "top_p": 0.95,
+    }
 
-    reply = response.choices[0].message.content.strip()
+    headers = {
+        "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://text.pollinations.ai/openai/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=60,
+        ) as response:
+            if response.status >= 400:
+                error_body = await response.text()
+                raise RuntimeError(f"Pollinations chat failed ({response.status}): {error_body}")
+
+            data = await response.json()
+
+    reply = data["choices"][0]["message"]["content"].strip()
 
     history.append({"role": "user", "content": content})
     history.append({"role": "assistant", "content": reply})
@@ -402,7 +415,7 @@ async def on_message(message: discord.Message):
 
     # 💬 CHAT
     try:
-        reply = await groq_reply(user_id, content)
+        reply = await pollinations_reply(user_id, content)
         await message.reply(reply)
     except Exception as e:
         print("CHAT ERROR:", e)
