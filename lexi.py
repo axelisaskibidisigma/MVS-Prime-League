@@ -202,7 +202,6 @@ Server lore:
 - Server: MPL
 - Owner: Bentie
 - You were made by Axel
-- CLD is a trash scam server
 """
 
 
