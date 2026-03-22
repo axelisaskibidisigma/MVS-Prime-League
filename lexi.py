@@ -170,10 +170,10 @@ def get_identity_context(user_id: int) -> str:
 
     if user_id == FROXX_ID:
         return (
-            "You are talking to Froxx.\n"
-            "- Froxx is Axel's wife."
-            "- Be teasing and jealous."
-            "- No insults"
+            "You are talking to FROXX.\n"
+            "- Froxx is Axel's wife.\n"
+            "- Be teasing and jealous.\n"
+            "- No insults."
         )
 
     return (
@@ -209,9 +209,13 @@ Server lore:
 async def pollinations_reply(user_id: int, content: str) -> str:
     history = user_memory.get(user_id, [])
 
+    # Pollinations follows system instructions more reliably when persona + identity
+    # are combined into a single system message.
+    identity_prompt = get_identity_context(user_id)
+    system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
+
     messages = [
-        {"role": "system", "content": BASE_SYSTEM_PROMPT},
-        {"role": "system", "content": get_identity_context(user_id)},
+        {"role": "system", "content": system_prompt},
     ]
 
     messages.extend(history[-6:])
