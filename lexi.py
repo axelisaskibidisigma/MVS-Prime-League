@@ -15,18 +15,21 @@ load_dotenv()
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 if not POLLINATIONS_API_KEY:
     raise RuntimeError("POLLINATIONS_API_KEY is missing")
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is missing")
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
 FROXX_ID = 1372276731645399090
 
-MODEL = "gemini-fast"
+CHAT_MODEL = "llama-3.1-8b-instant"
 STAY_VC_ID = 1447019217709961396
 
 
@@ -205,12 +208,10 @@ Server lore:
 """
 
 
-# ─── POLLINATIONS CHAT ───────────────────────────────────
-async def pollinations_reply(user_id: int, content: str) -> str:
+# ─── GROQ CHAT ───────────────────────────────────────────
+async def groq_reply(user_id: int, content: str) -> str:
     history = user_memory.get(user_id, [])
 
-    # Pollinations follows system instructions more reliably when persona + identity
-    # are combined into a single system message.
     identity_prompt = get_identity_context(user_id)
     system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
 
@@ -222,7 +223,7 @@ async def pollinations_reply(user_id: int, content: str) -> str:
     messages.append({"role": "user", "content": content})
 
     payload = {
-        "model": MODEL,
+        "model": CHAT_MODEL,
         "messages": messages,
         "temperature": 0.9,
         "max_tokens": 80,
@@ -230,20 +231,20 @@ async def pollinations_reply(user_id: int, content: str) -> str:
     }
 
     headers = {
-        "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            "https://text.pollinations.ai/openai/chat/completions",
+            "https://api.groq.com/openai/v1/chat/completions",
             json=payload,
             headers=headers,
             timeout=60,
         ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"Pollinations chat failed ({response.status}): {error_body}")
+                raise RuntimeError(f"Groq chat failed ({response.status}): {error_body}")
 
             data = await response.json()
 
@@ -418,7 +419,7 @@ async def on_message(message: discord.Message):
 
     # 💬 CHAT
     try:
-        reply = await pollinations_reply(user_id, content)
+        reply = await groq_reply(user_id, content)
         await message.reply(reply)
     except Exception as e:
         print("CHAT ERROR:", e)
