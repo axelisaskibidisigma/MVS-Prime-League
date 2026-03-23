@@ -29,7 +29,7 @@ AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
 FROXX_ID = 1372276731645399090
 
-CHAT_MODEL = "llama-3.1-8b-instant"
+CHAT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 STAY_VC_ID = 1447019217709961396
 
 
@@ -209,7 +209,7 @@ Server lore:
 
 
 # ─── GROQ CHAT ───────────────────────────────────────────
-async def groq_reply(user_id: int, content: str) -> str:
+async def groq_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
     history = user_memory.get(user_id, [])
 
     identity_prompt = get_identity_context(user_id)
@@ -220,7 +220,15 @@ async def groq_reply(user_id: int, content: str) -> str:
     ]
 
     messages.extend(history[-6:])
-    messages.append({"role": "user", "content": content})
+
+    attachment_urls = attachment_urls or []
+    if attachment_urls:
+        user_content = [{"type": "text", "text": content or "Describe these attachments."}]
+        for url in attachment_urls:
+            user_content.append({"type": "image_url", "image_url": {"url": url}})
+        messages.append({"role": "user", "content": user_content})
+    else:
+        messages.append({"role": "user", "content": content})
 
     payload = {
         "model": CHAT_MODEL,
@@ -250,7 +258,13 @@ async def groq_reply(user_id: int, content: str) -> str:
 
     reply = data["choices"][0]["message"]["content"].strip()
 
-    history.append({"role": "user", "content": content})
+    if attachment_urls:
+        attachment_summary = "\n".join(f"[attachment] {url}" for url in attachment_urls)
+        history_content = f"{content}\n{attachment_summary}".strip()
+    else:
+        history_content = content
+
+    history.append({"role": "user", "content": history_content})
     history.append({"role": "assistant", "content": reply})
 
     user_memory[user_id] = history[-MAX_MEMORY:]
@@ -391,6 +405,14 @@ async def on_message(message: discord.Message):
 
     user_id = message.author.id
     lower = content.lower()
+    attachment_urls = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+
+    if message.reference and isinstance(message.reference.resolved, discord.Message):
+        replied_message = message.reference.resolved
+        attachment_urls.extend(
+            a.url for a in replied_message.attachments
+            if a.content_type and a.content_type.startswith("image/")
+        )
 
     # 🔒 HARD NSFW BLOCK (GLOBAL)
     if NSFW_ENABLED and contains_nsfw(content):
@@ -431,7 +453,7 @@ async def on_message(message: discord.Message):
 
     # 💬 CHAT
     try:
-        reply = await groq_reply(user_id, content)
+        reply = await groq_reply(user_id, content, attachment_urls=attachment_urls)
         await message.reply(reply)
     except Exception as e:
         print("CHAT ERROR:", e)
