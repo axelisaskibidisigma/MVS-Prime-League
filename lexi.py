@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import asyncio
 import discord
 from discord.ext import commands, tasks
@@ -7,21 +8,20 @@ from dotenv import load_dotenv
 import re
 import time
 import aiohttp
-from urllib.parse import quote_plus
 
 
 load_dotenv()
 
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY")
+API_AIRFORCE_KEY = os.getenv("API_AIRFORCE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
-if not POLLINATIONS_API_KEY:
-    raise RuntimeError("POLLINATIONS_API_KEY is missing")
+if not API_AIRFORCE_KEY:
+    raise RuntimeError("API_AIRFORCE_KEY is missing")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
 
@@ -258,7 +258,7 @@ async def groq_reply(user_id: int, content: str) -> str:
     return reply or "brain lag. say it again."
 
 
-# ─── POLLINATIONS IMAGE SYSTEM ──────────────────────────
+# ─── API AIRFORCE IMAGE SYSTEM ──────────────────────────
 
 
 image_lock = asyncio.Lock()
@@ -285,28 +285,40 @@ async def generate_image(prompt):
 
 async def generate_image_file(prompt: str) -> discord.File:
     headers = {
-        "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
-        "X-API-Key": POLLINATIONS_API_KEY,
+        "Authorization": f"Bearer {API_AIRFORCE_KEY}",
+        "Content-Type": "application/json",
     }
 
-    encoded_prompt = quote_plus(prompt)
-    image_url = (
-        f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-        "?model=flux&nologo=true&private=true&width=768&height=768"
-    )
+    payload = {
+        "model": "imagen-4",
+        "prompt": prompt,
+        "size": "1024x1024",
+        "response_format": "b64_json",
+        "n": 1,
+    }
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(image_url, headers=headers, timeout=60) as response:
+        async with session.post(
+            "https://api.airforce/v1/images/generations",
+            json=payload,
+            headers=headers,
+            timeout=90,
+        ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"Pollinations generation failed ({response.status}): {error_body}")
+                raise RuntimeError(f"Api Airforce generation failed ({response.status}): {error_body}")
 
-            img_bytes = await response.read()
+            data = await response.json()
 
+    image_data = (data.get("data") or [{}])[0].get("b64_json")
+    if not image_data:
+        raise RuntimeError(f"Api Airforce returned no image data: {data}")
+
+    img_bytes = base64.b64decode(image_data)
     if len(img_bytes) < 1000:
-        raise RuntimeError("Pollinations returned an unexpectedly small image")
+        raise RuntimeError("Api Airforce returned an unexpectedly small image")
 
-    print("Pollinations model used: flux")
+    print("Api Airforce model used: imagen-4")
     return discord.File(io.BytesIO(img_bytes), filename="image.png")
 
 
