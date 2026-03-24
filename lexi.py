@@ -1,6 +1,7 @@
 import os
 import io
 import asyncio
+import base64
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -13,14 +14,14 @@ load_dotenv()
 
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-KIE_API_KEY = os.getenv("KIE_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
-if not KIE_API_KEY:
-    raise RuntimeError("KIE_API_KEY is missing")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is missing")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
 
@@ -271,7 +272,7 @@ async def groq_reply(user_id: int, content: str, attachment_urls: list[str] | No
     return reply or "brain lag. say it again."
 
 
-# ─── HUGGING FACE IMAGE SYSTEM ──────────────────────────
+# ─── GEMINI IMAGE SYSTEM ────────────────────────────────
 
 
 image_lock = asyncio.Lock()
@@ -279,7 +280,10 @@ last_request_time = 0
 MIN_DELAY = 15  # seconds (safe for 5 RPM)
 
 
-async def generate_image(prompt):
+IMAGE_MODEL = "nanobanana"
+
+
+async def generate_image(prompt: str, input_image_url: str | None = None):
     global last_request_time
 
     async with image_lock:
@@ -289,46 +293,82 @@ async def generate_image(prompt):
         if elapsed < MIN_DELAY:
             await asyncio.sleep(MIN_DELAY - elapsed)
 
-        # ---- CALL POLLINATIONS HERE ----
-        image_file = await generate_image_file(prompt)
+        image_file = await generate_image_file(prompt, input_image_url=input_image_url)
 
         last_request_time = time.time()
         return image_file
 
 
-async def generate_image_file(prompt: str) -> discord.File:
-    headers = {
-        "Authorization": f"Bearer {KIE_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "image/png",
-    }
+async def download_image(url: str) -> tuple[bytes, str]:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=60) as response:
+            if response.status >= 400:
+                error_body = await response.text()
+                raise RuntimeError(f"Failed to download input image ({response.status}): {error_body}")
+
+            mime_type = response.headers.get("Content-Type", "image/png").split(";")[0].strip()
+            img_bytes = await response.read()
+
+    if not mime_type.startswith("image/"):
+        raise RuntimeError(f"Input attachment is not an image (got: {mime_type})")
+
+    if len(img_bytes) < 100:
+        raise RuntimeError("Input image is too small or empty")
+
+    return img_bytes, mime_type
+
+
+async def generate_image_file(prompt: str, input_image_url: str | None = None) -> discord.File:
+    headers = {"Content-Type": "application/json"}
+
+    parts = [{"text": prompt}]
+    mode = "text-to-image"
+
+    if input_image_url:
+        img_bytes, mime_type = await download_image(input_image_url)
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": base64.b64encode(img_bytes).decode("utf-8"),
+                }
+            }
+        )
+        mode = "image-to-image"
 
     payload = {
-        "inputs": prompt,
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+        },
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            "https://router.huggingface.co/hf-inference/models/nanobanana-2",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}",
             json=payload,
             headers=headers,
             timeout=90,
         ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"Hugging Face generation failed ({response.status}): {error_body}")
+                raise RuntimeError(f"Gemini generation failed ({response.status}): {error_body}")
 
-            content_type = response.headers.get("Content-Type", "")
-            if "application/json" in content_type:
-                data = await response.json()
-                raise RuntimeError(f"Hugging Face returned JSON instead of image bytes: {data}")
+            data = await response.json()
 
-            img_bytes = await response.read()
-    if len(img_bytes) < 1000:
-        raise RuntimeError("Hugging Face returned an unexpectedly small image")
+    candidates = data.get("candidates", [])
+    for candidate in candidates:
+        content = candidate.get("content", {})
+        for part in content.get("parts", []):
+            inline_data = part.get("inlineData")
+            if inline_data and inline_data.get("data"):
+                img_bytes = base64.b64decode(inline_data["data"])
+                if len(img_bytes) < 1000:
+                    raise RuntimeError("Gemini returned an unexpectedly small image")
+                print(f"Gemini model used: {IMAGE_MODEL} ({mode})")
+                return discord.File(io.BytesIO(img_bytes), filename="image.png")
 
-    print("Hugging Face model used: nanobanana-2")
-    return discord.File(io.BytesIO(img_bytes), filename="image.png")
+    raise RuntimeError(f"Gemini did not return image data: {data}")
 
 
 
@@ -436,8 +476,10 @@ async def on_message(message: discord.Message):
 
         await message.reply("generating...")
 
+        input_image_url = attachment_urls[0] if attachment_urls else None
+
         try:
-            image_file = await generate_image(prompt)
+            image_file = await generate_image(prompt, input_image_url=input_image_url)
             await message.reply(file=image_file)
 
         except Exception as e:
