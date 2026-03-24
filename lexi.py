@@ -1,6 +1,5 @@
 import os
 import io
-import base64
 import asyncio
 import discord
 from discord.ext import commands, tasks
@@ -14,14 +13,14 @@ load_dotenv()
 
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-API_AIRFORCE_KEY = os.getenv("API_AIRFORCE_KEY")
+KIE_API_KEY = os.getenv("KIE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
-if not API_AIRFORCE_KEY:
-    raise RuntimeError("API_AIRFORCE_KEY is missing")
+if not KIE_API_KEY:
+    raise RuntimeError("KIE_API_KEY is missing")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
 
@@ -272,7 +271,7 @@ async def groq_reply(user_id: int, content: str, attachment_urls: list[str] | No
     return reply or "brain lag. say it again."
 
 
-# ─── API AIRFORCE IMAGE SYSTEM ──────────────────────────
+# ─── HUGGING FACE IMAGE SYSTEM ──────────────────────────
 
 
 image_lock = asyncio.Lock()
@@ -299,40 +298,36 @@ async def generate_image(prompt):
 
 async def generate_image_file(prompt: str) -> discord.File:
     headers = {
-        "Authorization": f"Bearer {API_AIRFORCE_KEY}",
+        "Authorization": f"Bearer {KIE_API_KEY}",
         "Content-Type": "application/json",
+        "Accept": "image/png",
     }
 
     payload = {
-        "model": "imagen-4",
-        "prompt": prompt,
-        "size": "1024x1024",
-        "response_format": "b64_json",
-        "n": 1,
+        "inputs": prompt,
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            "https://api.airforce/v1/images/generations",
+            "https://router.huggingface.co/hf-inference/models/nanobanana-2",
             json=payload,
             headers=headers,
             timeout=90,
         ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"Api Airforce generation failed ({response.status}): {error_body}")
+                raise RuntimeError(f"Hugging Face generation failed ({response.status}): {error_body}")
 
-            data = await response.json()
+            content_type = response.headers.get("Content-Type", "")
+            if "application/json" in content_type:
+                data = await response.json()
+                raise RuntimeError(f"Hugging Face returned JSON instead of image bytes: {data}")
 
-    image_data = (data.get("data") or [{}])[0].get("b64_json")
-    if not image_data:
-        raise RuntimeError(f"Api Airforce returned no image data: {data}")
-
-    img_bytes = base64.b64decode(image_data)
+            img_bytes = await response.read()
     if len(img_bytes) < 1000:
-        raise RuntimeError("Api Airforce returned an unexpectedly small image")
+        raise RuntimeError("Hugging Face returned an unexpectedly small image")
 
-    print("Api Airforce model used: imagen-4")
+    print("Hugging Face model used: nanobanana-2")
     return discord.File(io.BytesIO(img_bytes), filename="image.png")
 
 
