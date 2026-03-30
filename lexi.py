@@ -15,21 +15,21 @@ load_dotenv()
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing")
-if not GROQ_API_KEY:
-    raise RuntimeError("GROQ_API_KEY is missing")
+if not OPENROUTER_API_KEY:
+    raise RuntimeError("OPENROUTER_API_KEY is missing")
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
 FROXX_ID = 1372276731645399090
 
-CHAT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+CHAT_MODEL = "meta-llama/llama-4-maverick"
 STAY_VC_ID = 1447019217709961396
 
 
@@ -208,8 +208,8 @@ Server lore:
 """
 
 
-# ─── GROQ CHAT ───────────────────────────────────────────
-async def groq_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
+# ─── OPENROUTER CHAT ─────────────────────────────────────
+async def openrouter_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
     history = user_memory.get(user_id, [])
 
     identity_prompt = get_identity_context(user_id)
@@ -239,20 +239,20 @@ async def groq_reply(user_id: int, content: str, attachment_urls: list[str] | No
     }
 
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions",
             json=payload,
             headers=headers,
             timeout=60,
         ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"Groq chat failed ({response.status}): {error_body}")
+                raise RuntimeError(f"OpenRouter chat failed ({response.status}): {error_body}")
 
             data = await response.json()
 
@@ -490,7 +490,7 @@ async def on_message(message: discord.Message):
 
     # 💬 CHAT
     try:
-        reply = await groq_reply(user_id, content, attachment_urls=attachment_urls)
+        reply = await openrouter_reply(user_id, content, attachment_urls=attachment_urls)
         await message.reply(reply)
     except Exception as e:
         print("CHAT ERROR:", e)
