@@ -476,13 +476,21 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
+    if not bot.user:
+        return
+
     bot_id = bot.user.id
 
     mentions_bot = (
         f"<@{bot_id}>" in message.content or f"<@!{bot_id}>" in message.content
     )
+    replied_to_bot = (
+        message.reference is not None
+        and isinstance(message.reference.resolved, discord.Message)
+        and message.reference.resolved.author.id == bot_id
+    )
 
-    if not mentions_bot:
+    if not mentions_bot and not replied_to_bot:
         return
 
     content = (
