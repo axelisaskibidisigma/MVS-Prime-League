@@ -15,6 +15,7 @@ load_dotenv()
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 API_AIRFORCE_KEY= os.getenv("API_AIRFORCE_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 
@@ -22,13 +23,15 @@ if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
 if not API_AIRFORCE_KEY:
     raise RuntimeError("API_AIRFORCE_KEY is missing")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is missing")
 
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
 CWXT_ID = 996502136387018843
 
-CHAT_MODEL = "mistral"
+CHAT_MODEL = "gemma-4-31b-it"
 STAY_VC_ID = 1447019217709961396
 
 
@@ -216,62 +219,81 @@ Server lore:
 - Axel is inactive
 """
 
-# ─── OPENROUTER CHAT ─────────────────────────────────────
-async def pollinations_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
+# ─── GOOGLE AI CHAT ──────────────────────────────────────
+def sanitize_model_response(text: str) -> str:
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"^\s*\*?think\*?:?.*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+async def google_ai_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
     history = user_memory.get(user_id, [])
     identity_prompt = get_identity_context(user_id)
     system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-    ]
-    messages.extend(history[-6:])
+    messages = history[-6:]
 
     attachment_urls = attachment_urls or []
 
-    # === SWITCH LOGIC HERE ===
-    if attachment_urls:
-        model_to_use = "gemini-search"          # ← Use Gemini with search + vision when image is attached
-        user_message = {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": content or "Describe these images and answer like Lexi."}
-            ]
-        }
-        for url in attachment_urls:
-            user_message["content"].append({"type": "image_url", "image_url": {"url": url}})
-    else:
-        model_to_use = CHAT_MODEL               # Your normal model (currently "mistral")
-        user_message = {"role": "user", "content": content}
+    messages.append({"role": "user", "content": content})
 
-    messages.append(user_message)
+    gemini_contents = []
+    for i, msg in enumerate(messages):
+        role = "model" if msg["role"] == "assistant" else "user"
+        parts = [{"text": str(msg["content"])}]
+
+        if attachment_urls and i == len(messages) - 1:
+            async with aiohttp.ClientSession() as session:
+                for url in attachment_urls:
+                    async with session.get(url, timeout=30) as img_response:
+                        if img_response.status >= 400:
+                            error_body = await img_response.text()
+                            raise RuntimeError(
+                                f"Attachment download failed ({img_response.status}): {error_body}"
+                            )
+                        mime_type = img_response.headers.get("Content-Type", "image/jpeg").split(";")[0]
+                        image_bytes = await img_response.read()
+                        parts.append(
+                            {
+                                "inlineData": {
+                                    "mimeType": mime_type,
+                                    "data": base64.b64encode(image_bytes).decode("utf-8"),
+                                }
+                            }
+                        )
+
+        gemini_contents.append({"role": role, "parts": parts})
 
     payload = {
-        "model": model_to_use,                  # ← Dynamic model
-        "messages": messages,
-        "temperature": 0.85,
-        "max_tokens": 100,      # Keep short as per your Lexi style
-        "top_p": 0.95,
-    }
-
-    headers = {
-        "Authorization": f"Bearer sk_cKxGsQRI9COxCmFCGF1OeCMfbL8Fq3R2",   # You're already using this key
-        "Content-Type": "application/json",
+        "systemInstruction": {
+            "parts": [{"text": system_prompt}],
+        },
+        "contents": gemini_contents,
+        "generationConfig": {
+            "temperature": 0.85,
+            "topP": 0.95,
+            "maxOutputTokens": 100,
+        },
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            "https://gen.pollinations.ai/v1/chat/completions",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{CHAT_MODEL}:generateContent?key={GEMINI_API_KEY}",
             json=payload,
-            headers=headers,
             timeout=60,
         ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"pollinations chat failed ({response.status}): {error_body}")
+                raise RuntimeError(f"Google AI chat failed ({response.status}): {error_body}")
             data = await response.json()
 
-    reply = data["choices"][0]["message"]["content"].strip()
+    reply = ""
+    candidates = data.get("candidates") or []
+    if candidates:
+        parts = (((candidates[0] or {}).get("content") or {}).get("parts")) or []
+        reply = "".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
+    reply = sanitize_model_response(reply)
 
     # Update memory
     if attachment_urls:
@@ -467,7 +489,7 @@ async def on_message(message: discord.Message):
 
     # 💬 CHAT
     try:
-        reply = await pollinations_reply(user_id, content, attachment_urls=attachment_urls)
+        reply = await google_ai_reply(user_id, content, attachment_urls=attachment_urls)
         await message.reply(reply)
     except Exception as e:
         print("CHAT ERROR:", e)
