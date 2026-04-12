@@ -2,6 +2,8 @@ import os
 import io
 import asyncio
 import base64
+import mimetypes
+from urllib.parse import urlparse, unquote
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -257,41 +259,59 @@ def sanitize_model_response(text: str) -> str:
     return cleaned
 
 
-async def google_ai_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
+async def google_ai_reply(
+    user_id: int,
+    content: str,
+    attachment_urls: list[dict[str, str]] | None = None,
+) -> str:
     history = user_memory.get(user_id, [])
     identity_prompt = get_identity_context(user_id)
     system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
 
     messages = history[-6:]
 
-    attachment_urls = attachment_urls or []
+    attachment_contexts = attachment_urls or []
 
     messages.append({"role": "user", "content": content})
+
+    downloaded_attachments: list[dict[str, str]] = []
+    if attachment_contexts:
+        async with aiohttp.ClientSession() as session:
+            for attachment in attachment_contexts:
+                url = attachment["url"]
+                async with session.get(url, timeout=30) as file_response:
+                    if file_response.status >= 400:
+                        error_body = await file_response.text()
+                        raise RuntimeError(
+                            f"Attachment download failed ({file_response.status}): {error_body}"
+                        )
+                    response_mime = file_response.headers.get("Content-Type", "").split(";")[0].strip()
+                    fallback_mime = attachment.get("mime_type") or "application/octet-stream"
+                    file_bytes = await file_response.read()
+                    downloaded_attachments.append(
+                        {
+                            "filename": attachment.get("filename", "attachment"),
+                            "mime_type": response_mime or fallback_mime,
+                            "url": url,
+                            "data": base64.b64encode(file_bytes).decode("utf-8"),
+                        }
+                    )
 
     gemini_contents = []
     for i, msg in enumerate(messages):
         role = "model" if msg["role"] == "assistant" else "user"
         parts = [{"text": str(msg["content"])}]
 
-        if attachment_urls and i == len(messages) - 1:
-            async with aiohttp.ClientSession() as session:
-                for url in attachment_urls:
-                    async with session.get(url, timeout=30) as img_response:
-                        if img_response.status >= 400:
-                            error_body = await img_response.text()
-                            raise RuntimeError(
-                                f"Attachment download failed ({img_response.status}): {error_body}"
-                            )
-                        mime_type = img_response.headers.get("Content-Type", "image/jpeg").split(";")[0]
-                        image_bytes = await img_response.read()
-                        parts.append(
-                            {
-                                "inlineData": {
-                                    "mimeType": mime_type,
-                                    "data": base64.b64encode(image_bytes).decode("utf-8"),
-                                }
-                            }
-                        )
+        if downloaded_attachments and i == len(messages) - 1:
+            for attachment in downloaded_attachments:
+                parts.append(
+                    {
+                        "inlineData": {
+                            "mimeType": attachment["mime_type"],
+                            "data": attachment["data"],
+                        }
+                    }
+                )
 
         gemini_contents.append({"role": role, "parts": parts})
 
@@ -326,8 +346,11 @@ async def google_ai_reply(user_id: int, content: str, attachment_urls: list[str]
     reply = sanitize_model_response(reply)
 
     # Update memory
-    if attachment_urls:
-        attachment_summary = "\n".join(f"[image] {url}" for url in attachment_urls)
+    if attachment_contexts:
+        attachment_summary = "\n".join(
+            f"[attachment] {attachment['filename']} | {attachment['mime_type']} | {attachment['url']}"
+            for attachment in attachment_contexts
+        )
         history_content = f"{content}\n{attachment_summary}".strip()
     else:
         history_content = content
@@ -471,13 +494,29 @@ async def on_message(message: discord.Message):
 
     user_id = message.author.id
     lower = content.lower()
-    attachment_urls = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+    attachment_urls: list[dict[str, str]] = []
+
+    def resolve_attachment_payload(attachment: discord.Attachment) -> dict[str, str]:
+        filename = attachment.filename
+        if not filename:
+            parsed = urlparse(attachment.url)
+            filename = unquote(parsed.path.rsplit("/", 1)[-1]) or "attachment"
+        mime_type = attachment.content_type
+        if not mime_type:
+            guessed_mime, _ = mimetypes.guess_type(filename)
+            mime_type = guessed_mime or "application/octet-stream"
+        return {
+            "filename": filename,
+            "mime_type": mime_type,
+            "url": attachment.url,
+        }
+
+    attachment_urls.extend(resolve_attachment_payload(a) for a in message.attachments)
 
     if message.reference and isinstance(message.reference.resolved, discord.Message):
         replied_message = message.reference.resolved
         attachment_urls.extend(
-            a.url for a in replied_message.attachments
-            if a.content_type and a.content_type.startswith("image/")
+            resolve_attachment_payload(a) for a in replied_message.attachments
         )
 
     # 🔒 HARD NSFW BLOCK (GLOBAL)
