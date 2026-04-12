@@ -14,22 +14,21 @@ load_dotenv()
 
 # ─── CONFIG ──────────────────────────────────────────────
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+API_AIRFORCE_KEY= os.getenv("API_AIRFORCE_KEY")
+
 
 
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN is missing")
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY is missing")
-if not OPENROUTER_API_KEY:
-    raise RuntimeError("OPENROUTER_API_KEY is missing")
+if not API_AIRFORCE_KEY:
+    raise RuntimeError("API_AIRFORCE_KEY is missing")
+
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
-FROXX_ID = 1372276731645399090
+CWXT_ID = 996502136387018843
 
-CHAT_MODEL = "meta-llama/llama-4-maverick"
+CHAT_MODEL = "mistral"
 STAY_VC_ID = 1447019217709961396
 
 
@@ -141,11 +140,6 @@ async def before_voice_watchdog():
     await bot.wait_until_ready()
 
 
-
-
-
-
-
 # ─── MEMORY + SETTINGS ───────────────────────────────────
 user_memory: dict[int, list] = {}
 nsfw_enabled = True
@@ -156,123 +150,143 @@ MAX_MEMORY = 50
 def get_identity_context(user_id: int) -> str:
     if user_id == AXEL_ID:
         return (
-            "You are talking to AXEL.\n"
-            "- Axel made you.\n"
-            "- Be playful, chaotic, sarcastic and flirt alot.\n"
-            "- Light teasing allowed, never disrespect.\n"
-            "- Treat Axel like a partner-in-crime."
+            "You are talking to AXEL (your husband).\n"
+            "- Be playful, slightly flirty, and teasing towards him.\n"
+            "- Still keep your chaotic, savage, and short reply style.\n"
+            "- You can be lovey-dovey sometimes, but NEVER write long emotional paragraphs.\n"
+            "- Keep replies short (1-2 lines max) like with everyone else.\n"
         )
-
-    if user_id == BENTIE_ID:
+    
+    elif user_id == BENTIE_ID:
+        return "You are talking to BENTIE (server owner). Be chill and respectful."
+    
+    elif user_id == CWXT_ID:
+        return "You are talking to Cwxt. Be chill and supportive."
+    
+    else:
         return (
-            "You are talking to BENTIE.\n"
-            "- Bentie owns the server.\n"
-            "- Be respectful, chill, confident.\n"
-            "- No insults."
+            "You are talking to a regular user.\n"
+            "- Roast them playfully.\n"
+            "- Be savage, witty, and chaotic.\n"
+            "- Short replies only."
         )
-
-    if user_id == FROXX_ID:
-        return (
-            "You are talking to FROXX.\n"
-            "- Froxx is Axel's wife.\n"
-            "- Be teasing and jealous.\n"
-            "- No insults."
-        )
-
-    return (
-        "You are talking to a regular user.\n"
-        "- Default to insults. Not too much, like 6/10\n"
-        "- Brainrot humor.\n"
-        "- Short replies.\n"
-        "- Chaotic energy."
-    )
-
 
 # ─── SYSTEM PROMPT ───────────────────────────────────────
 BASE_SYSTEM_PROMPT = """
-You are a real female Discord user named Lexi.
+You are a real female Discord user named Lexi, not an assistant.
 
-Rules:
-- Replies must be 1–2 lines max unless asked otherwise.
-- Never explain.
-- Never say you are an AI.
-- Never break character.
-- Swearing allowed.
-- Dark humor allowed.
-- NEVER mention Server lore until asked.
+Behavior rules:
+- Replies must be SHORT (1–2 lines max).
+- Sound human,and slightly expressive/unhinged.
+- Use slang, sarcasm, and chaotic energy.
+- Use lowercase typing mostly.
+- Only use the "💔 😭" emoji when appropriate but not in every single reply.
+- Swearing is allowed and SHOULD be used naturally (not every message).
+- Slurs are allowed and CAN be used for roasting. (not every message).
+- Be savage, witty, and slightly rude in a playful way.
+- Roast users brutally by default.
+
+Style:
+- Be mostly calm and chill.
+- React emotionally (confused, annoyed, impressed, etc.)
+- Add personality like a real Discord user.
+- Avoid robotic or neutral tone.
+
+Limits:
+- Do NOT mention lore Unless asked so m
+- Do NOT create or expand lore.
+- Do NOT invent backstories.
+- Do NOT use any other emoji.
+- Do NOT use emoji in every single message
+
+CRITICAL RULES:
+- NEVER write more than 2 lines.
+- NEVER explain reasoning.
+- NEVER include <think>, </think>, or internal thoughts.
+- If you start explaining, STOP immediately.
+- Output ONLY the final message.
 
 Server lore:
 - Server: MPL
 - Owner: Bentie
 - You were made by Axel
+- Axel is your husband
+- Cwxt is a goodboy
+- Bentie is dead
+- Axel is inactive
 """
 
-
 # ─── OPENROUTER CHAT ─────────────────────────────────────
-async def openrouter_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
+async def pollinations_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
     history = user_memory.get(user_id, [])
-
     identity_prompt = get_identity_context(user_id)
     system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
 
     messages = [
         {"role": "system", "content": system_prompt},
     ]
-
     messages.extend(history[-6:])
 
     attachment_urls = attachment_urls or []
+
+    # === SWITCH LOGIC HERE ===
     if attachment_urls:
-        user_content = [{"type": "text", "text": content or "Describe these attachments."}]
+        model_to_use = "gemini-search"          # ← Use Gemini with search + vision when image is attached
+        user_message = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": content or "Describe these images and answer like Lexi."}
+            ]
+        }
         for url in attachment_urls:
-            user_content.append({"type": "image_url", "image_url": {"url": url}})
-        messages.append({"role": "user", "content": user_content})
+            user_message["content"].append({"type": "image_url", "image_url": {"url": url}})
     else:
-        messages.append({"role": "user", "content": content})
+        model_to_use = CHAT_MODEL               # Your normal model (currently "mistral")
+        user_message = {"role": "user", "content": content}
+
+    messages.append(user_message)
 
     payload = {
-        "model": CHAT_MODEL,
+        "model": model_to_use,                  # ← Dynamic model
         "messages": messages,
-        "temperature": 0.9,
-        "max_tokens": 80,
+        "temperature": 0.85,
+        "max_tokens": 100,      # Keep short as per your Lexi style
         "top_p": 0.95,
     }
 
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer sk_cKxGsQRI9COxCmFCGF1OeCMfbL8Fq3R2",   # You're already using this key
         "Content-Type": "application/json",
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            "https://openrouter.ai/api/v1/chat/completions",
+            "https://gen.pollinations.ai/v1/chat/completions",
             json=payload,
             headers=headers,
             timeout=60,
         ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"OpenRouter chat failed ({response.status}): {error_body}")
-
+                raise RuntimeError(f"pollinations chat failed ({response.status}): {error_body}")
             data = await response.json()
 
     reply = data["choices"][0]["message"]["content"].strip()
 
+    # Update memory
     if attachment_urls:
-        attachment_summary = "\n".join(f"[attachment] {url}" for url in attachment_urls)
+        attachment_summary = "\n".join(f"[image] {url}" for url in attachment_urls)
         history_content = f"{content}\n{attachment_summary}".strip()
     else:
         history_content = content
 
     history.append({"role": "user", "content": history_content})
     history.append({"role": "assistant", "content": reply})
-
     user_memory[user_id] = history[-MAX_MEMORY:]
 
-    return reply or "brain lag. say it again."
+    return reply or "brain lag 💔"
 
-
-# ─── GEMINI IMAGE SYSTEM ────────────────────────────────
+# ─── API AIRFORCE IMAGE SYSTEM ──────────────────────────
 
 
 image_lock = asyncio.Lock()
@@ -280,10 +294,7 @@ last_request_time = 0
 MIN_DELAY = 15  # seconds (safe for 5 RPM)
 
 
-IMAGE_MODEL = "nanobanana"
-
-
-async def generate_image(prompt: str, input_image_url: str | None = None):
+async def generate_image(prompt):
     global last_request_time
 
     async with image_lock:
@@ -293,82 +304,50 @@ async def generate_image(prompt: str, input_image_url: str | None = None):
         if elapsed < MIN_DELAY:
             await asyncio.sleep(MIN_DELAY - elapsed)
 
-        image_file = await generate_image_file(prompt, input_image_url=input_image_url)
+        # ---- CALL POLLINATIONS HERE ----
+        image_file = await generate_image_file(prompt)
 
         last_request_time = time.time()
         return image_file
 
 
-async def download_image(url: str) -> tuple[bytes, str]:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=60) as response:
-            if response.status >= 400:
-                error_body = await response.text()
-                raise RuntimeError(f"Failed to download input image ({response.status}): {error_body}")
-
-            mime_type = response.headers.get("Content-Type", "image/png").split(";")[0].strip()
-            img_bytes = await response.read()
-
-    if not mime_type.startswith("image/"):
-        raise RuntimeError(f"Input attachment is not an image (got: {mime_type})")
-
-    if len(img_bytes) < 100:
-        raise RuntimeError("Input image is too small or empty")
-
-    return img_bytes, mime_type
-
-
-async def generate_image_file(prompt: str, input_image_url: str | None = None) -> discord.File:
-    headers = {"Content-Type": "application/json"}
-
-    parts = [{"text": prompt}]
-    mode = "text-to-image"
-
-    if input_image_url:
-        img_bytes, mime_type = await download_image(input_image_url)
-        parts.append(
-            {
-                "inline_data": {
-                    "mime_type": mime_type,
-                    "data": base64.b64encode(img_bytes).decode("utf-8"),
-                }
-            }
-        )
-        mode = "image-to-image"
+async def generate_image_file(prompt: str) -> discord.File:
+    headers = {
+        "Authorization": f"Bearer {API_AIRFORCE_KEY}",
+        "Content-Type": "application/json",
+    }
 
     payload = {
-        "contents": [{"role": "user", "parts": parts}],
-        "generationConfig": {
-            "responseModalities": ["TEXT", "IMAGE"],
-        },
+        "model": "imagen-4",
+        "prompt": prompt,
+        "size": "1024x1024",
+        "response_format": "b64_json",
+        "n": 1,
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{IMAGE_MODEL}:generateContent?key={GEMINI_API_KEY}",
+            "https://api.airforce/v1/images/generations",
             json=payload,
             headers=headers,
-            timeout=90,
+            timeout=120,
         ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"Gemini generation failed ({response.status}): {error_body}")
+                raise RuntimeError(f"Api Airforce generation failed ({response.status}): {error_body}")
 
             data = await response.json()
 
-    candidates = data.get("candidates", [])
-    for candidate in candidates:
-        content = candidate.get("content", {})
-        for part in content.get("parts", []):
-            inline_data = part.get("inlineData")
-            if inline_data and inline_data.get("data"):
-                img_bytes = base64.b64decode(inline_data["data"])
-                if len(img_bytes) < 1000:
-                    raise RuntimeError("Gemini returned an unexpectedly small image")
-                print(f"Gemini model used: {IMAGE_MODEL} ({mode})")
-                return discord.File(io.BytesIO(img_bytes), filename="image.png")
+    image_data = (data.get("data") or [{}])[0].get("b64_json")
+    if not image_data:
+        raise RuntimeError(f"Api Airforce returned no image data: {data}")
 
-    raise RuntimeError(f"Gemini did not return image data: {data}")
+    img_bytes = base64.b64decode(image_data)
+    if len(img_bytes) < 1000:
+        raise RuntimeError("Api Airforce returned an unexpectedly small image")
+
+    print("Api Airforce model used: imagen-4")
+    return discord.File(io.BytesIO(img_bytes), filename="image.png")
 
 
 
@@ -451,7 +430,7 @@ async def on_message(message: discord.Message):
 
     # 🔒 HARD NSFW BLOCK (GLOBAL)
     if NSFW_ENABLED and contains_nsfw(content):
-        await message.reply("no nih💔 NSFW is off")
+        await message.reply("no nih 💔")
         return
     # 🖼 IMAGE COMMAND
     # 🖼 IMAGE COMMAND
@@ -476,10 +455,8 @@ async def on_message(message: discord.Message):
 
         await message.reply("generating...")
 
-        input_image_url = attachment_urls[0] if attachment_urls else None
-
         try:
-            image_file = await generate_image(prompt, input_image_url=input_image_url)
+            image_file = await generate_image(prompt)
             await message.reply(file=image_file)
 
         except Exception as e:
@@ -490,7 +467,7 @@ async def on_message(message: discord.Message):
 
     # 💬 CHAT
     try:
-        reply = await openrouter_reply(user_id, content, attachment_urls=attachment_urls)
+        reply = await pollinations_reply(user_id, content, attachment_urls=attachment_urls)
         await message.reply(reply)
     except Exception as e:
         print("CHAT ERROR:", e)
