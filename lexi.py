@@ -221,10 +221,66 @@ Server lore:
 
 # ─── GOOGLE AI CHAT ──────────────────────────────────────
 def sanitize_model_response(text: str) -> str:
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"^\s*\*?think\*?:?.*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
+    cleaned = text or ""
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<thinking>.*?</thinking>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+
+    # Drop common "reasoning" headers/lines that some chat models emit.
+    forbidden_line_prefixes = (
+        "think:",
+        "*think*:",
+        "thought:",
+        "thoughts:",
+        "reasoning:",
+        "internal reasoning:",
+        "analysis:",
+        "chain of thought:",
+    )
+    scaffold_prefixes = (
+        "user ",
+        "user:",
+        "role:",
+        "target:",
+        "relationship:",
+        "constraints:",
+        "option ",
+        "lowercase?",
+        "short?",
+        "savage?",
+        "no disallowed emojis?",
+        "no long paragraphs?",
+    )
+    filtered_lines = []
+    for line in cleaned.splitlines():
+        normalized = line.strip().lower()
+        if any(normalized.startswith(prefix) for prefix in forbidden_line_prefixes):
+            continue
+        if any(normalized.startswith(prefix) for prefix in scaffold_prefixes):
+            continue
+        filtered_lines.append(line)
+    cleaned = "\n".join(filtered_lines)
+
+    # If model leaks "Final answer:" style formatting, keep only the final part.
+    final_markers = ("final answer:", "answer:")
+    lowered = cleaned.lower()
+    marker_positions = [lowered.rfind(marker) for marker in final_markers]
+    marker_positions = [pos for pos in marker_positions if pos != -1]
+    if marker_positions:
+        cut_at = max(marker_positions)
+        cleaned = cleaned[cut_at:].split(":", 1)[-1]
+
+    # If scaffolding leaked with candidate quoted answers, keep the last quoted candidate.
+    quoted_candidates = re.findall(r'"([^"\n]{4,})"', cleaned)
+    if quoted_candidates:
+        cleaned = quoted_candidates[-1]
+
+    # Remove common bullet formatting + accidental duplicated answer.
+    cleaned = re.sub(r"^[\s•\-\*]+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = re.sub(r"(.{8,}?)\s+\1$", r"\1", cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
 
 
 async def google_ai_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
@@ -475,10 +531,9 @@ async def on_message(message: discord.Message):
             await message.reply("nice try 💀 NSFW is off.")
             return
 
-        await message.reply("generating...")
-
         try:
-            image_file = await generate_image(prompt)
+            async with message.channel.typing():
+                image_file = await generate_image(prompt)
             await message.reply(file=image_file)
 
         except Exception as e:
@@ -489,7 +544,8 @@ async def on_message(message: discord.Message):
 
     # 💬 CHAT
     try:
-        reply = await google_ai_reply(user_id, content, attachment_urls=attachment_urls)
+        async with message.channel.typing():
+            reply = await google_ai_reply(user_id, content, attachment_urls=attachment_urls)
         await message.reply(reply)
     except Exception as e:
         print("CHAT ERROR:", e)
