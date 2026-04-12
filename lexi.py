@@ -221,10 +221,40 @@ Server lore:
 
 # ─── GOOGLE AI CHAT ──────────────────────────────────────
 def sanitize_model_response(text: str) -> str:
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
-    cleaned = re.sub(r"^\s*\*?think\*?:?.*$", "", cleaned, flags=re.IGNORECASE | re.MULTILINE)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
+    cleaned = text or ""
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<thinking>.*?</thinking>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+
+    # Drop common "reasoning" headers/lines that some chat models emit.
+    forbidden_line_prefixes = (
+        "think:",
+        "*think*:",
+        "thought:",
+        "thoughts:",
+        "reasoning:",
+        "internal reasoning:",
+        "analysis:",
+        "chain of thought:",
+    )
+    filtered_lines = []
+    for line in cleaned.splitlines():
+        normalized = line.strip().lower()
+        if any(normalized.startswith(prefix) for prefix in forbidden_line_prefixes):
+            continue
+        filtered_lines.append(line)
+    cleaned = "\n".join(filtered_lines)
+
+    # If model leaks "Final answer:" style formatting, keep only the final part.
+    final_markers = ("final answer:", "answer:")
+    lowered = cleaned.lower()
+    marker_positions = [lowered.rfind(marker) for marker in final_markers]
+    marker_positions = [pos for pos in marker_positions if pos != -1]
+    if marker_positions:
+        cut_at = max(marker_positions)
+        cleaned = cleaned[cut_at:].split(":", 1)[-1]
+
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
 
 
 async def google_ai_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
