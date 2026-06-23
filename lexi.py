@@ -2,8 +2,6 @@ import os
 import io
 import asyncio
 import base64
-import mimetypes
-from urllib.parse import urlparse, unquote
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -18,7 +16,7 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 API_AIRFORCE_KEY= os.getenv("API_AIRFORCE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
+POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY")
 
 
 if not DISCORD_TOKEN:
@@ -27,13 +25,15 @@ if not API_AIRFORCE_KEY:
     raise RuntimeError("API_AIRFORCE_KEY is missing")
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY is missing")
-
+if not POLLINATIONS_API_KEY:
+    raise RuntimeError("POLLINATIONS_API_KEY is missing")
 
 AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
 CWXT_ID = 996502136387018843
 
 CHAT_MODEL = "gemma-4-31b-it"
+POLLINATIONS_MODEL = "mistral"
 STAY_VC_ID = 1447019217709961396
 
 
@@ -219,6 +219,8 @@ Server lore:
 - Cwxt is a goodboy
 - Bentie is dead
 - Axel is inactive
+- MPL is dead
+- No one talks there anymore, it's rare.
 """
 
 # ─── GOOGLE AI CHAT ──────────────────────────────────────
@@ -238,10 +240,26 @@ def sanitize_model_response(text: str) -> str:
         "analysis:",
         "chain of thought:",
     )
+    scaffold_prefixes = (
+        "user ",
+        "user:",
+        "role:",
+        "target:",
+        "relationship:",
+        "constraints:",
+        "option ",
+        "lowercase?",
+        "short?",
+        "savage?",
+        "no disallowed emojis?",
+        "no long paragraphs?",
+    )
     filtered_lines = []
     for line in cleaned.splitlines():
         normalized = line.strip().lower()
         if any(normalized.startswith(prefix) for prefix in forbidden_line_prefixes):
+            continue
+        if any(normalized.startswith(prefix) for prefix in scaffold_prefixes):
             continue
         filtered_lines.append(line)
     cleaned = "\n".join(filtered_lines)
@@ -255,63 +273,55 @@ def sanitize_model_response(text: str) -> str:
         cut_at = max(marker_positions)
         cleaned = cleaned[cut_at:].split(":", 1)[-1]
 
+    # If scaffolding leaked with candidate quoted answers, keep the last quoted candidate.
+    quoted_candidates = re.findall(r'"([^"\n]{4,})"', cleaned)
+    if quoted_candidates:
+        cleaned = quoted_candidates[-1]
+
+    # Remove common bullet formatting + accidental duplicated answer.
+    cleaned = re.sub(r"^[\s•\-\*]+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = re.sub(r"(.{8,}?)\s+\1$", r"\1", cleaned, flags=re.IGNORECASE)
+
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned
 
 
-async def google_ai_reply(
-    user_id: int,
-    content: str,
-    attachment_urls: list[dict[str, str]] | None = None,
-) -> str:
+async def google_ai_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
     history = user_memory.get(user_id, [])
     identity_prompt = get_identity_context(user_id)
     system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
 
     messages = history[-6:]
 
-    attachment_contexts = attachment_urls or []
+    attachment_urls = attachment_urls or []
 
     messages.append({"role": "user", "content": content})
-
-    downloaded_attachments: list[dict[str, str]] = []
-    if attachment_contexts:
-        async with aiohttp.ClientSession() as session:
-            for attachment in attachment_contexts:
-                url = attachment["url"]
-                async with session.get(url, timeout=30) as file_response:
-                    if file_response.status >= 400:
-                        error_body = await file_response.text()
-                        raise RuntimeError(
-                            f"Attachment download failed ({file_response.status}): {error_body}"
-                        )
-                    response_mime = file_response.headers.get("Content-Type", "").split(";")[0].strip()
-                    fallback_mime = attachment.get("mime_type") or "application/octet-stream"
-                    file_bytes = await file_response.read()
-                    downloaded_attachments.append(
-                        {
-                            "filename": attachment.get("filename", "attachment"),
-                            "mime_type": response_mime or fallback_mime,
-                            "url": url,
-                            "data": base64.b64encode(file_bytes).decode("utf-8"),
-                        }
-                    )
 
     gemini_contents = []
     for i, msg in enumerate(messages):
         role = "model" if msg["role"] == "assistant" else "user"
         parts = [{"text": str(msg["content"])}]
 
-        if downloaded_attachments and i == len(messages) - 1:
-            for attachment in downloaded_attachments:
-                parts.append(
-                    {
-                        "inlineData": {
-                            "mimeType": attachment["mime_type"],
-                            "data": attachment["data"],
-                        }
-                    }
-                )
+        if attachment_urls and i == len(messages) - 1:
+            async with aiohttp.ClientSession() as session:
+                for url in attachment_urls:
+                    async with session.get(url, timeout=30) as img_response:
+                        if img_response.status >= 400:
+                            error_body = await img_response.text()
+                            raise RuntimeError(
+                                f"Attachment download failed ({img_response.status}): {error_body}"
+                            )
+                        mime_type = img_response.headers.get("Content-Type", "image/jpeg").split(";")[0]
+                        image_bytes = await img_response.read()
+                        parts.append(
+                            {
+                                "inlineData": {
+                                    "mimeType": mime_type,
+                                    "data": base64.b64encode(image_bytes).decode("utf-8"),
+                                }
+                            }
+                        )
 
         gemini_contents.append({"role": role, "parts": parts})
 
@@ -346,11 +356,8 @@ async def google_ai_reply(
     reply = sanitize_model_response(reply)
 
     # Update memory
-    if attachment_contexts:
-        attachment_summary = "\n".join(
-            f"[attachment] {attachment['filename']} | {attachment['mime_type']} | {attachment['url']}"
-            for attachment in attachment_contexts
-        )
+    if attachment_urls:
+        attachment_summary = "\n".join(f"[image] {url}" for url in attachment_urls)
         history_content = f"{content}\n{attachment_summary}".strip()
     else:
         history_content = content
@@ -361,6 +368,106 @@ async def google_ai_reply(
 
     return reply or "brain lag 💔"
 
+async def pollinations_reply(user_id: int, content: str) -> str:
+    history = user_memory.get(user_id, [])
+
+    identity_prompt = get_identity_context(user_id)
+    system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt
+        }
+    ]
+
+    for msg in history[-6:]:
+        messages.append({
+            "role": msg["role"],
+            "content": str(msg["content"])
+        })
+
+    messages.append({
+        "role": "user",
+        "content": content
+    })
+
+    payload = {
+        "model": POLLINATIONS_MODEL,
+        "messages": messages,
+        "temperature": 0.85,
+        "max_tokens": 100
+    }
+
+    headers = {
+        "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://gen.pollinations.ai/text/{content}",
+            json=payload,
+            headers=headers,
+            timeout=60
+        ) as response:
+
+            if response.status >= 400:
+                error_body = await response.text()
+                raise RuntimeError(
+                    f"Pollinations failed ({response.status}): {error_body}"
+                )
+
+            data = await response.json()
+
+    reply = ""
+
+    choices = data.get("choices") or []
+
+    if choices:
+        reply = (
+            (choices[0].get("message") or {}).get("content", "")
+        )
+
+    reply = sanitize_model_response(reply)
+
+    history.append({
+        "role": "user",
+        "content": content
+    })
+
+    history.append({
+        "role": "assistant",
+        "content": reply
+    })
+
+    user_memory[user_id] = history[-MAX_MEMORY:]
+
+    return reply or "brain lag 💔"
+
+async def chat_reply(
+    user_id: int,
+    content: str,
+    attachment_urls: list[str] | None = None
+) -> str:
+
+    attachment_urls = attachment_urls or []
+
+    # Images → Gemini
+    if attachment_urls:
+        print("Using Gemini (vision)")
+        return await google_ai_reply(
+            user_id,
+            content,
+            attachment_urls
+        )
+
+    # Text only → Mistral
+    print("Using Pollinations Mistral")
+    return await pollinations_reply(
+        user_id,
+        content
+    )
 # ─── API AIRFORCE IMAGE SYSTEM ──────────────────────────
 
 
@@ -473,13 +580,21 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
+    if not bot.user:
+        return
+
     bot_id = bot.user.id
 
     mentions_bot = (
         f"<@{bot_id}>" in message.content or f"<@!{bot_id}>" in message.content
     )
+    replied_to_bot = (
+        message.reference is not None
+        and isinstance(message.reference.resolved, discord.Message)
+        and message.reference.resolved.author.id == bot_id
+    )
 
-    if not mentions_bot:
+    if not mentions_bot and not replied_to_bot:
         return
 
     content = (
@@ -494,30 +609,15 @@ async def on_message(message: discord.Message):
 
     user_id = message.author.id
     lower = content.lower()
-    attachment_urls: list[dict[str, str]] = []
-
-    def resolve_attachment_payload(attachment: discord.Attachment) -> dict[str, str]:
-        filename = attachment.filename
-        if not filename:
-            parsed = urlparse(attachment.url)
-            filename = unquote(parsed.path.rsplit("/", 1)[-1]) or "attachment"
-        mime_type = attachment.content_type
-        if not mime_type:
-            guessed_mime, _ = mimetypes.guess_type(filename)
-            mime_type = guessed_mime or "application/octet-stream"
-        return {
-            "filename": filename,
-            "mime_type": mime_type,
-            "url": attachment.url,
-        }
-
-    attachment_urls.extend(resolve_attachment_payload(a) for a in message.attachments)
+    attachment_urls = [a.url for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
 
     if message.reference and isinstance(message.reference.resolved, discord.Message):
         replied_message = message.reference.resolved
         attachment_urls.extend(
-            resolve_attachment_payload(a) for a in replied_message.attachments
+            a.url for a in replied_message.attachments
+            if a.content_type and a.content_type.startswith("image/")
         )
+
 
     # 🔒 HARD NSFW BLOCK (GLOBAL)
     if NSFW_ENABLED and contains_nsfw(content):
@@ -544,10 +644,9 @@ async def on_message(message: discord.Message):
             await message.reply("nice try 💀 NSFW is off.")
             return
 
-        await message.reply("generating...")
-
         try:
-            image_file = await generate_image(prompt)
+            async with message.channel.typing():
+                image_file = await generate_image(prompt)
             await message.reply(file=image_file)
 
         except Exception as e:
@@ -558,7 +657,8 @@ async def on_message(message: discord.Message):
 
     # 💬 CHAT
     try:
-        reply = await google_ai_reply(user_id, content, attachment_urls=attachment_urls)
+        async with message.channel.typing():
+            reply = await chat_reply(user_id, content, attachment_urls=attachment_urls)
         await message.reply(reply)
     except Exception as e:
         print("CHAT ERROR:", e)
