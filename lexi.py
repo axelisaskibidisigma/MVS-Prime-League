@@ -2,6 +2,8 @@ import os
 import io
 import asyncio
 import base64
+from urllib.parse import quote
+
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -32,7 +34,7 @@ AXEL_ID = 767710430176084009
 BENTIE_ID = 1172198644234072297
 CWXT_ID = 996502136387018843
 
-CHAT_MODEL = "gemma-4-31b-it"
+GEMMA_MODEL = os.getenv("GEMMA_MODEL", "gemma-3-27b-it")
 POLLINATIONS_MODEL = "mistral"
 STAY_VC_ID = 1447019217709961396
 
@@ -223,7 +225,7 @@ Server lore:
 - No one talks there anymore, it's rare.
 """
 
-# ─── GOOGLE AI CHAT ──────────────────────────────────────
+# ─── CHAT HELPERS ─────────────────────────────────────────
 def sanitize_model_response(text: str) -> str:
     cleaned = text or ""
     cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
@@ -287,24 +289,79 @@ def sanitize_model_response(text: str) -> str:
     return cleaned
 
 
-async def google_ai_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
+def message_content_to_text(content) -> str:
+    if isinstance(content, list):
+        text_parts = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if text:
+                    text_parts.append(str(text))
+                inline_data = part.get("inlineData")
+                if inline_data:
+                    mime_type = inline_data.get("mimeType", "image")
+                    text_parts.append(f"[attachment: {mime_type}]")
+            else:
+                text_parts.append(str(part))
+        return "\n".join(text_parts)
+    return str(content)
+
+
+def build_pollinations_prompt(system_prompt: str, messages: list[dict]) -> str:
+    prompt_lines = [f"System: {system_prompt.strip()}"]
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = message_content_to_text(msg.get("parts", msg.get("content", "")))
+        prompt_lines.append(f"{role.title()}: {content}")
+    prompt_lines.append("Assistant:")
+    return "\n\n".join(prompt_lines)
+
+
+async def pollinations_text_get(prompt: str, model: str) -> str:
+    params = {
+        "model": model,
+        "temperature": "0.85",
+        "max_tokens": "100",
+        "key": POLLINATIONS_API_KEY,
+    }
+    query = "&".join(f"{quote(str(key))}={quote(str(value))}" for key, value in params.items())
+    url = f"https://text.pollinations.ai/{quote(prompt, safe='')}?{query}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=60) as response:
+            if response.status >= 400:
+                error_body = await response.text()
+                raise RuntimeError(f"Pollinations failed ({response.status}): {error_body}")
+
+            content_type = response.headers.get("Content-Type", "")
+            if "application/json" in content_type:
+                data = await response.json()
+                if isinstance(data, dict):
+                    choices = data.get("choices") or []
+                    if choices:
+                        return (choices[0].get("message") or {}).get("content", "")
+                    return str(data.get("text") or data.get("response") or "")
+                return str(data)
+
+            return await response.text()
+
+
+async def google_gemma_attachment_reply(user_id: int, content: str, attachment_urls: list[str] | None = None) -> str:
     history = user_memory.get(user_id, [])
     identity_prompt = get_identity_context(user_id)
     system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
 
     messages = history[-6:]
-
     attachment_urls = attachment_urls or []
-
     messages.append({"role": "user", "content": content})
 
-    gemini_contents = []
-    for i, msg in enumerate(messages):
-        role = "model" if msg["role"] == "assistant" else "user"
-        parts = [{"text": str(msg["content"])}]
+    gemma_contents = []
+    async with aiohttp.ClientSession() as session:
+        for i, msg in enumerate(messages):
+            role = "model" if msg["role"] == "assistant" else "user"
+            parts = [{"text": str(msg["content"])}]
 
-        if attachment_urls and i == len(messages) - 1:
-            async with aiohttp.ClientSession() as session:
+            if attachment_urls and i == len(messages) - 1:
                 for url in attachment_urls:
                     async with session.get(url, timeout=30) as img_response:
                         if img_response.status >= 400:
@@ -323,29 +380,28 @@ async def google_ai_reply(user_id: int, content: str, attachment_urls: list[str]
                             }
                         )
 
-        gemini_contents.append({"role": role, "parts": parts})
+            gemma_contents.append({"role": role, "parts": parts})
 
-    payload = {
-        "systemInstruction": {
-            "parts": [{"text": system_prompt}],
-        },
-        "contents": gemini_contents,
-        "generationConfig": {
-            "temperature": 0.85,
-            "topP": 0.95,
-            "maxOutputTokens": 100,
-        },
-    }
+        payload = {
+            "systemInstruction": {
+                "parts": [{"text": system_prompt}],
+            },
+            "contents": gemma_contents,
+            "generationConfig": {
+                "temperature": 0.85,
+                "topP": 0.95,
+                "maxOutputTokens": 100,
+            },
+        }
 
-    async with aiohttp.ClientSession() as session:
         async with session.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{CHAT_MODEL}:generateContent?key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMMA_MODEL}:generateContent?key={GEMINI_API_KEY}",
             json=payload,
             timeout=60,
         ) as response:
             if response.status >= 400:
                 error_body = await response.text()
-                raise RuntimeError(f"Google AI chat failed ({response.status}): {error_body}")
+                raise RuntimeError(f"Google Gemma chat failed ({response.status}): {error_body}")
             data = await response.json()
 
     reply = ""
@@ -374,12 +430,7 @@ async def pollinations_reply(user_id: int, content: str) -> str:
     identity_prompt = get_identity_context(user_id)
     system_prompt = f"{BASE_SYSTEM_PROMPT.strip()}\n\n{identity_prompt}"
 
-    messages = [
-        {
-            "role": "system",
-            "content": system_prompt
-        }
-    ]
+    messages = []
 
     for msg in history[-6:]:
         messages.append({
@@ -392,43 +443,8 @@ async def pollinations_reply(user_id: int, content: str) -> str:
         "content": content
     })
 
-    payload = {
-        "model": POLLINATIONS_MODEL,
-        "messages": messages,
-        "temperature": 0.85,
-        "max_tokens": 100
-    }
-
-    headers = {
-        "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://gen.pollinations.ai/text/{content}",
-            json=payload,
-            headers=headers,
-            timeout=60
-        ) as response:
-
-            if response.status >= 400:
-                error_body = await response.text()
-                raise RuntimeError(
-                    f"Pollinations failed ({response.status}): {error_body}"
-                )
-
-            data = await response.json()
-
-    reply = ""
-
-    choices = data.get("choices") or []
-
-    if choices:
-        reply = (
-            (choices[0].get("message") or {}).get("content", "")
-        )
-
+    prompt = build_pollinations_prompt(system_prompt, messages)
+    reply = await pollinations_text_get(prompt, POLLINATIONS_MODEL)
     reply = sanitize_model_response(reply)
 
     history.append({
@@ -453,10 +469,10 @@ async def chat_reply(
 
     attachment_urls = attachment_urls or []
 
-    # Images → Gemini
+    # Attachments → Gemma
     if attachment_urls:
-        print("Using Gemini (vision)")
-        return await google_ai_reply(
+        print("Using Google Gemma (attachments)")
+        return await google_gemma_attachment_reply(
             user_id,
             content,
             attachment_urls
